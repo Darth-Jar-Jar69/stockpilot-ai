@@ -1,0 +1,137 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?
+  firstName    String?
+  image        String?
+  verified     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  accounts    OAuthAccount[]
+  profile     UserProfile?
+  watchlist   WatchlistItem[]
+  chatThreads ChatThread[]
+  portfolio   Portfolio?
+  paperTrades PaperTrade[]
+}
+
+model UserProfile {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  riskTolerance     String   @default("moderate")
+  preferredMarkets  String   @default("US")
+  paperCashBalance  Float    @default(0)
+  paperStartingCash Float    @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model OAuthAccount {
+  id                String @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+model PendingVerification {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  firstName    String?
+  code         String
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+}
+
+model WatchlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  symbol    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, symbol])
+  @@index([userId])
+}
+
+model ChatThread {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String   @default("Assistant")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([userId])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  threadId  String
+  role      String
+  content   String
+  createdAt DateTime @default(now())
+
+  thread ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId])
+}
+
+model Portfolio {
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  holdings Holding[]
+}
+
+model Holding {
+  id          String   @id @default(cuid())
+  portfolioId String
+  symbol      String
+  shares      Float
+  avgCost     Float?
+  createdAt   DateTime @default(now())
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@unique([portfolioId, symbol])
+}
+
+model PaperTrade {
+  id         String   @id @default(cuid())
+  userId     String
+  symbol     String
+  side       String
+  shares     Float
+  price      Float
+  orderType  String   @default("market")
+  limitPrice Float?
+  commission Float    @default(0)
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

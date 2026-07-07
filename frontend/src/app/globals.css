@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Global styles — dark-first Bloomberg/TradingView-inspired theme.
+ * CSS variables enable shadcn/ui theming and consistent glass surfaces.
+ */
+
+@layer base {
+  :root {
+    --background: 222 47% 5%;
+    --foreground: 210 40% 98%;
+    --card: 222 47% 7%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222 47% 7%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 142 76% 42%;
+    --primary-foreground: 144 80% 10%;
+    --secondary: 217 33% 14%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 22% 72%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217 33% 16%;
+    --input: 217 33% 16%;
+    --ring: 142 76% 42%;
+    --radius: 0.625rem;
+    --chart-1: 142 76% 42%;
+    --chart-2: 199 89% 48%;
+    --chart-3: 262 83% 58%;
+    --chart-4: 43 96% 56%;
+    --chart-5: 0 72% 51%;
+    --gain: 142 76% 42%;
+    --loss: 0 72% 51%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth antialiased;
+  }
+
+  body {
+    @apply bg-background text-foreground min-h-screen;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card/60 backdrop-blur-xl border border-border/50;
+  }
+
+  .glass-strong {
+    @apply bg-card/80 backdrop-blur-2xl border border-border/60;
+  }
+
+  .text-gain {
+    color: hsl(var(--gain));
+  }
+
+  .text-loss {
+    color: hsl(var(--loss));
+  }
+
+  .grid-bg {
+    @apply bg-grid-pattern bg-grid;
+  }
+}

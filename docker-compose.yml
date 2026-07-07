@@ -1,0 +1,18 @@
+# Local PostgreSQL for development.
+# Prisma connects via DATABASE_URL in frontend/.env
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stockpilot-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: stockpilot
+      POSTGRES_PASSWORD: stockpilot_dev
+      POSTGRES_DB: stockpilot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
