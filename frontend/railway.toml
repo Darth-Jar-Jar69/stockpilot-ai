@@ -1,0 +1,8 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "sh -c 'npx prisma db push --skip-generate && node server.js'"
+healthcheckPath = "/"
+restartPolicyType = "ON_FAILURE"

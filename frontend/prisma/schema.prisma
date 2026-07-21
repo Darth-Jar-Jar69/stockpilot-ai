@@ -3,7 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  // Use PostgreSQL in production (Railway). Locally you can still point
+  // DATABASE_URL at Docker Postgres from docker-compose.yml.
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
