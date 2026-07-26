@@ -19,6 +19,14 @@ _NAME_TO_SYMBOL: dict[str, str] = {
     "intel": "INTC",
     "disney": "DIS",
     "walmart": "WMT",
+    "asml": "ASML",
+    "ferrari": "RACE",
+    "toyota": "TM",
+    "alibaba": "BABA",
+    "novo nordisk": "NVO",
+    "unilever": "UL",
+    "shopify": "SHOP",
+    "stellantis": "STLA",
 }
 
 

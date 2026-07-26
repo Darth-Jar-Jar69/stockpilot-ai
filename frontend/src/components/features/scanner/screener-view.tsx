@@ -139,7 +139,7 @@ export function ScreenerView() {
       <div>
         <h1 className="text-2xl font-bold text-white">Stock Screener</h1>
         <p className="text-sm text-slate-400">
-          Screen {universe}+ real US stocks by symbol, sector, price, RSI, and StockPilot scores.
+          Screen {universe}+ US-listed stocks & ADRs by symbol, sector, price, RSI, and StockPilot scores.
         </p>
       </div>
 

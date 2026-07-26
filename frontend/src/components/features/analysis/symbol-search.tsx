@@ -23,7 +23,7 @@ export function SymbolSearch() {
       <Input
         value={symbol}
         onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-        placeholder="Enter symbol (e.g. AAPL, MSFT)"
+        placeholder="Enter symbol (e.g. AAPL, ASML, RACE)"
         className="max-w-xs border-border/60 bg-secondary/80 text-white placeholder:text-slate-500"
       />
       <Button type="submit" variant="secondary">

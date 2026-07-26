@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from app.core.cache import TTLCache
 from app.core.exceptions import MarketDataError
@@ -23,8 +24,9 @@ from app.services.technical.service import analysis_service
 
 logger = logging.getLogger("stockpilot.scanner")
 
-_CONCURRENCY = 10
+_CONCURRENCY = 12
 _scanner_cache: TTLCache[ScannerResponse] = TTLCache()
+_TICKER_QUERY = re.compile(r"^[A-Z]{1,5}(-[A-Z])?$")
 
 
 def _analyst_sentiment(technical: float | None, momentum: float | None) -> str:
@@ -53,7 +55,25 @@ def matches_query(item: ScanResult, query: str | None) -> bool:
 
 
 class ScannerService:
-    """Scan a broad US equity universe using real market data."""
+    """Scan a broad global equity universe (US listings + major ADRs) using real market data."""
+
+    async def _maybe_add_query_symbol(
+        self,
+        results: list[ScanResult],
+        query: str | None,
+    ) -> list[ScanResult]:
+        """If the user typed an exact ticker outside the universe, fetch it on demand."""
+        if not query:
+            return results
+        symbol = query.strip().upper()
+        if not _TICKER_QUERY.fullmatch(symbol):
+            return results
+        if any(r.symbol == symbol for r in results):
+            return results
+        extra = await self._scan_symbol_fast(symbol)
+        if extra is None:
+            return results
+        return [*results, extra]
 
     async def _scan_symbol_fast(self, symbol: str) -> ScanResult | None:
         """Lighter scan — quote + OHLCV indicators, skip full AI explanation."""
@@ -280,6 +300,7 @@ class ScannerService:
             return cached
 
         results = await self._scan_many(SCANNER_UNIVERSE)
+        results = await self._maybe_add_query_symbol(results, filters.query)
         filtered = self._apply_filters(results, filters)
         ranked = self._rank_opportunities(filtered)[: filters.limit]
         ranked = self._attach_enrichment(ranked, filters.investment_horizon, filters.risk_level)
@@ -290,7 +311,7 @@ class ScannerService:
 
         response = ScannerResponse(
             results=ranked,
-            universe_size=len(SCANNER_UNIVERSE),
+            universe_size=max(len(SCANNER_UNIVERSE), len(results)),
             filters_applied=applied,
         )
         await _scanner_cache.set(cache_key, response, 180)

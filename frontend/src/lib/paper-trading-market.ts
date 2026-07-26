@@ -99,11 +99,17 @@ export function searchSymbols(query: string, limit = 12) {
   const q = query.trim().toUpperCase();
   if (!q) return SEARCHABLE_SYMBOLS.slice(0, limit);
   const lower = query.trim().toLowerCase();
-  return SEARCHABLE_SYMBOLS.filter(
+  const matches = SEARCHABLE_SYMBOLS.filter(
     (s) =>
       s.symbol.startsWith(q) ||
       s.symbol.includes(q) ||
       s.name.toUpperCase().includes(q) ||
       s.name.toLowerCase().includes(lower),
   ).slice(0, limit);
+
+  // Allow any ticker-like input even if it isn't in the curated list
+  if (/^[A-Z]{1,5}(-[A-Z])?$/.test(q) && !matches.some((s) => s.symbol === q)) {
+    return [{ symbol: q, name: SYMBOL_NAMES[q] ?? q }, ...matches].slice(0, limit);
+  }
+  return matches;
 }

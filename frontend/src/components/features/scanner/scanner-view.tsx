@@ -149,7 +149,7 @@ export function ScannerView() {
             </Badge>
           </h1>
           <p className="text-sm text-slate-400">
-            AI stock discovery across {data?.universe_size ?? 120}+ US equities — live data, StockPilot scores.
+            AI stock discovery across {data?.universe_size ?? 300}+ US-listed equities & ADRs — live data, StockPilot scores.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
