@@ -84,6 +84,66 @@ async def get_scanner(
         raise HTTPException(status_code=503, detail={"code": exc.code, "message": exc.message}) from exc
 
 
+@router.get("/scanner/fallen-giants")
+async def get_fallen_giants(
+    min_decline: float = Query(10, ge=5, le=80),
+    min_market_cap: float | None = Query(10_000_000_000, ge=0),
+    risk: str | None = Query(None, description="low, medium, or high"),
+    min_recovery_score: float | None = Query(None, ge=0, le=100),
+    min_fundamental_score: float | None = Query(None, ge=0, le=100),
+    catalyst_type: str | None = Query(None),
+    max_days_since_crash: int | None = Query(90, ge=7, le=180),
+    sort_by: str = Query("fallen_giants_score"),
+    limit: int = Query(20, ge=1, le=40),
+):
+    from app.schemas.fallen_giants import FallenGiantsFilters
+    from app.services.scanner.fallen_giants import fallen_giants_service
+
+    allowed_sort = {
+        "fallen_giants_score",
+        "decline_percent",
+        "recovery_score",
+        "fundamental_health_score",
+    }
+    allowed_catalyst = {
+        "earnings_miss",
+        "guidance_cut",
+        "regulatory",
+        "lawsuit",
+        "product_failure",
+        "management_change",
+        "government_action",
+        "contract_loss",
+        "financial_warning",
+        "other",
+        "unclear",
+    }
+    if sort_by not in allowed_sort:
+        sort_by = "fallen_giants_score"
+    if risk is not None and risk not in {"low", "medium", "high"}:
+        risk = None
+    if catalyst_type is not None and catalyst_type not in allowed_catalyst:
+        catalyst_type = None
+
+    filters = FallenGiantsFilters(
+        min_decline=min_decline,
+        min_market_cap=min_market_cap,
+        risk=risk,  # type: ignore[arg-type]
+        min_recovery_score=min_recovery_score,
+        min_fundamental_score=min_fundamental_score,
+        catalyst_type=catalyst_type,  # type: ignore[arg-type]
+        max_days_since_crash=max_days_since_crash,
+        sort_by=sort_by,  # type: ignore[arg-type]
+        limit=limit,
+    )
+    try:
+        return await fallen_giants_service.scan(filters)
+    except MarketDataError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": exc.message}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": str(exc)}) from exc
+
+
 @router.get("/screener", response_model=ScannerResponse)
 async def get_screener(
     min_rsi: float | None = Query(None, ge=0, le=100),

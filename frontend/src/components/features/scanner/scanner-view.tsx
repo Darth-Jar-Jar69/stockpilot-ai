@@ -7,10 +7,12 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Mountain,
   RefreshCw,
   Sparkles,
 } from "lucide-react";
 
+import { FallenGiantsView } from "@/components/features/scanner/fallen-giants-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrency, formatPercent, cn } from "@/lib/utils";
 import type { ScanResult, ScannerResponse } from "@/types/scanner";
 
+type Strategy = "stockpilot" | "fallen_giants";
 type Horizon = "" | "long" | "medium" | "short";
 type Risk = "" | "low" | "medium" | "high";
 type SortKey =
@@ -70,6 +73,7 @@ function formatMarketCap(n: number | null): string {
 }
 
 export function ScannerView() {
+  const [strategy, setStrategy] = useState<Strategy>("stockpilot");
   const [data, setData] = useState<ScannerResponse | null>(null);
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -79,6 +83,7 @@ export function ScannerView() {
   const [sortAsc, setSortAsc] = useState(false);
 
   const load = useCallback(async () => {
+    if (strategy !== "stockpilot") return;
     setLoading(true);
     setError(undefined);
     try {
@@ -97,7 +102,7 @@ export function ScannerView() {
     } finally {
       setLoading(false);
     }
-  }, [horizon, risk]);
+  }, [horizon, risk, strategy]);
 
   useEffect(() => {
     load();
@@ -149,117 +154,164 @@ export function ScannerView() {
             </Badge>
           </h1>
           <p className="text-sm text-slate-400">
-            AI stock discovery across {data?.universe_size ?? 300}+ US-listed equities & ADRs — live data, StockPilot scores.
+            Strategy scanners across {data?.universe_size ?? 300}+ US-listed equities & ADRs — live
+            data, event catalysts, StockPilot scores.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RefreshCw className={cn("mr-2 h-4 w-4", loading && "animate-spin")} />
-          Refresh
+        {strategy === "stockpilot" && (
+          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+            <RefreshCw className={cn("mr-2 h-4 w-4", loading && "animate-spin")} />
+            Refresh
+          </Button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant={strategy === "stockpilot" ? "default" : "outline"}
+          onClick={() => setStrategy("stockpilot")}
+          className="gap-1.5"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          StockPilot Opportunities
+        </Button>
+        <Button
+          size="sm"
+          variant={strategy === "fallen_giants" ? "default" : "outline"}
+          onClick={() => setStrategy("fallen_giants")}
+          className="gap-1.5"
+        >
+          <Mountain className="h-3.5 w-3.5" />
+          Fallen Giants
         </Button>
       </div>
 
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2">
-          <span className="self-center text-xs font-medium uppercase tracking-wide text-slate-500">
-            Horizon
-          </span>
-          {HORIZONS.map((h) => (
-            <Button
-              key={h.id || "any-h"}
-              size="sm"
-              variant={horizon === h.id ? "default" : "outline"}
-              onClick={() => setHorizon(h.id)}
-            >
-              {h.label}
-            </Button>
-          ))}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <span className="self-center text-xs font-medium uppercase tracking-wide text-slate-500">
-            Risk
-          </span>
-          {RISKS.map((r) => (
-            <Button
-              key={r.id || "any-r"}
-              size="sm"
-              variant={risk === r.id ? "default" : "outline"}
-              onClick={() => setRisk(r.id)}
-            >
-              {r.label}
-            </Button>
-          ))}
-        </div>
-      </div>
+      {strategy === "fallen_giants" ? (
+        <FallenGiantsView />
+      ) : (
+        <>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap gap-2">
+              <span className="self-center text-xs font-medium uppercase tracking-wide text-slate-500">
+                Horizon
+              </span>
+              {HORIZONS.map((h) => (
+                <Button
+                  key={h.id || "any-h"}
+                  size="sm"
+                  variant={horizon === h.id ? "default" : "outline"}
+                  onClick={() => setHorizon(h.id)}
+                >
+                  {h.label}
+                </Button>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <span className="self-center text-xs font-medium uppercase tracking-wide text-slate-500">
+                Risk
+              </span>
+              {RISKS.map((r) => (
+                <Button
+                  key={r.id || "any-r"}
+                  size="sm"
+                  variant={risk === r.id ? "default" : "outline"}
+                  onClick={() => setRisk(r.id)}
+                >
+                  {r.label}
+                </Button>
+              ))}
+            </div>
+          </div>
 
-      {loading && (
-        <div className="space-y-3">
-          <p className="text-sm text-slate-500">
-            Scanning 140+ US equities with live data… first load may take up to a minute.
-          </p>
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-20 w-full rounded-lg" />
-          ))}
-        </div>
-      )}
+          {loading && (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-500">
+                Scanning equities with live data… first load may take up to a minute.
+              </p>
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-20 w-full rounded-lg" />
+              ))}
+            </div>
+          )}
 
-      {error && (
-        <Card className="border-amber-500/30 bg-amber-500/10">
-          <CardContent className="flex items-start gap-3 py-6">
-            <AlertTriangle className="h-5 w-5 text-amber-400" />
-            <p className="text-sm text-amber-100">{error}</p>
-          </CardContent>
-        </Card>
-      )}
+          {error && (
+            <Card className="border-amber-500/30 bg-amber-500/10">
+              <CardContent className="flex items-start gap-3 py-6">
+                <AlertTriangle className="h-5 w-5 text-amber-400" />
+                <p className="text-sm text-amber-100">{error}</p>
+              </CardContent>
+            </Card>
+          )}
 
-      {data && !loading && (
-        <Card className="glass border-border/50">
-          <CardHeader>
-            <CardTitle className="text-white">AI-Ranked Opportunities</CardTitle>
-            <CardDescription className="text-slate-400">{data.disclaimer}</CardDescription>
-          </CardHeader>
-          <CardContent className="overflow-x-auto">
-            {sorted.length === 0 ? (
-              <p className="text-sm text-slate-400">No matches for these filters. Try broadening your criteria.</p>
-            ) : (
-              <table className="w-full min-w-[1100px] text-sm">
-                <thead>
-                  <tr className="border-b border-border/50 text-left text-xs text-slate-500">
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("symbol")}>
-                      Symbol <SortIcon col="symbol" />
-                    </th>
-                    <th className="pb-3 pr-4">Company</th>
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("price")}>
-                      Price <SortIcon col="price" />
-                    </th>
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("change_percent")}>
-                      Today <SortIcon col="change_percent" />
-                    </th>
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("predicted_price")}>
-                      Predicted <SortIcon col="predicted_price" />
-                    </th>
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("predicted_change_percent")}>
-                      Pred % <SortIcon col="predicted_change_percent" />
-                    </th>
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("stockpilot_score")}>
-                      StockPilot Score <SortIcon col="stockpilot_score" />
-                    </th>
-                    <th className="pb-3 pr-4">Mkt Cap</th>
-                    <th className="pb-3 pr-4">P/E</th>
-                    <th className="pb-3 pr-4">Sentiment</th>
-                    <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("recommendation")}>
-                      AI Rating <SortIcon col="recommendation" />
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sorted.map((row) => (
-                    <ScannerRow key={row.symbol} row={row} />
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </CardContent>
-        </Card>
+          {data && !loading && (
+            <Card className="glass border-border/50">
+              <CardHeader>
+                <CardTitle className="text-white">AI-Ranked Opportunities</CardTitle>
+                <CardDescription className="text-slate-400">{data.disclaimer}</CardDescription>
+              </CardHeader>
+              <CardContent className="overflow-x-auto">
+                {sorted.length === 0 ? (
+                  <p className="text-sm text-slate-400">
+                    No matches for these filters. Try broadening your criteria.
+                  </p>
+                ) : (
+                  <table className="w-full min-w-[1100px] text-sm">
+                    <thead>
+                      <tr className="border-b border-border/50 text-left text-xs text-slate-500">
+                        <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("symbol")}>
+                          Symbol <SortIcon col="symbol" />
+                        </th>
+                        <th className="pb-3 pr-4">Company</th>
+                        <th className="cursor-pointer pb-3 pr-4" onClick={() => toggleSort("price")}>
+                          Price <SortIcon col="price" />
+                        </th>
+                        <th
+                          className="cursor-pointer pb-3 pr-4"
+                          onClick={() => toggleSort("change_percent")}
+                        >
+                          Today <SortIcon col="change_percent" />
+                        </th>
+                        <th
+                          className="cursor-pointer pb-3 pr-4"
+                          onClick={() => toggleSort("predicted_price")}
+                        >
+                          Predicted <SortIcon col="predicted_price" />
+                        </th>
+                        <th
+                          className="cursor-pointer pb-3 pr-4"
+                          onClick={() => toggleSort("predicted_change_percent")}
+                        >
+                          Pred % <SortIcon col="predicted_change_percent" />
+                        </th>
+                        <th
+                          className="cursor-pointer pb-3 pr-4"
+                          onClick={() => toggleSort("stockpilot_score")}
+                        >
+                          StockPilot Score <SortIcon col="stockpilot_score" />
+                        </th>
+                        <th className="pb-3 pr-4">Mkt Cap</th>
+                        <th className="pb-3 pr-4">P/E</th>
+                        <th className="pb-3 pr-4">Sentiment</th>
+                        <th
+                          className="cursor-pointer pb-3 pr-4"
+                          onClick={() => toggleSort("recommendation")}
+                        >
+                          AI Rating <SortIcon col="recommendation" />
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.map((row) => (
+                        <ScannerRow key={row.symbol} row={row} />
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardContent>
+            </Card>
+          )}
+        </>
       )}
     </div>
   );
@@ -273,7 +325,10 @@ function ScannerRow({ row }: { row: ScanResult }) {
     <>
       <tr className="border-b border-border/30 transition-colors hover:bg-card/50">
         <td className="py-3 pr-4">
-          <Link href={`/analysis/${row.symbol}`} className="font-mono font-semibold text-white hover:text-primary">
+          <Link
+            href={`/analysis/${row.symbol}`}
+            className="font-mono font-semibold text-white hover:text-primary"
+          >
             {row.symbol}
           </Link>
         </td>
@@ -290,17 +345,24 @@ function ScannerRow({ row }: { row: ScanResult }) {
           {row.predicted_price != null ? formatCurrency(row.predicted_price, "USD") : "—"}
         </td>
         <td className={cn("py-3 pr-4 font-medium", predPositive ? "text-gain" : "text-loss")}>
-          {row.predicted_change_percent != null ? formatPercent(row.predicted_change_percent) : "—"}
+          {row.predicted_change_percent != null
+            ? formatPercent(row.predicted_change_percent)
+            : "—"}
         </td>
         <td className="py-3 pr-4">
           <div className="flex items-center gap-2">
             <div className="h-1.5 w-16 overflow-hidden rounded-full bg-secondary">
               <div
-                className={cn("h-full rounded-full", score >= 60 ? "bg-gain" : score >= 40 ? "bg-amber-400" : "bg-loss")}
+                className={cn(
+                  "h-full rounded-full",
+                  score >= 60 ? "bg-gain" : score >= 40 ? "bg-amber-400" : "bg-loss",
+                )}
                 style={{ width: `${Math.min(100, score)}%` }}
               />
             </div>
-            <span className="font-mono text-white">{row.stockpilot_score?.toFixed(1) ?? "—"}</span>
+            <span className="font-mono text-white">
+              {row.stockpilot_score?.toFixed(1) ?? "—"}
+            </span>
           </div>
         </td>
         <td className="py-3 pr-4 text-slate-300">{formatMarketCap(row.market_cap)}</td>
