@@ -108,7 +108,7 @@ export function searchSymbols(query: string, limit = 12) {
   ).slice(0, limit);
 
   // Allow any ticker-like input even if it isn't in the curated list
-  if (/^[A-Z]{1,5}(-[A-Z])?$/.test(q) && !matches.some((s) => s.symbol === q)) {
+  if (/^[A-Z][A-Z0-9.\-]{0,6}$/.test(q) && !matches.some((s) => s.symbol === q)) {
     return [{ symbol: q, name: SYMBOL_NAMES[q] ?? q }, ...matches].slice(0, limit);
   }
   return matches;

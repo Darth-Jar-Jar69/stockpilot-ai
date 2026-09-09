@@ -35,7 +35,8 @@ const YAHOO_UA = "Mozilla/5.0 (compatible; StockPilot/1.0)";
 
 const FALLBACK_UNIVERSE = [
   "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "JPM", "V", "UNH",
-  "AVGO", "COST", "LLY", "AMD", "NFLX", "ASML", "RACE", "TSM",
+  "AVGO", "COST", "LLY", "AMD", "NFLX", "ASML", "RACE", "TSM", "SNPS", "CDNS",
+  "ORCL", "CRM", "ADBE", "INTU", "NOW", "PANW", "CRWD", "ANET",
 ] as const;
 
 function sma(values: number[], period: number): number | null {
@@ -208,7 +209,10 @@ export async function yahooQuoteFallback(symbol: string) {
 }
 
 export async function yahooAnalysisFallback(symbol: string) {
-  const chart = await fetchYahooChart(symbol.toUpperCase(), "1y");
+  const [chart, searchHit] = await Promise.all([
+    fetchYahooChart(symbol.toUpperCase(), "1y"),
+    fetchYahooSearchQuote(symbol),
+  ]);
   const closes =
     chart.indicators?.quote?.[0]?.close?.filter((v): v is number => typeof v === "number") ?? [];
   const price = chart.meta?.regularMarketPrice ?? closes.at(-1);
@@ -231,10 +235,15 @@ export async function yahooAnalysisFallback(symbol: string) {
   const riskScore =
     rsi14 == null ? null : Math.max(0, Math.min(100, Math.abs(rsi14 - 50) * 1.5 + 25));
 
+  const resolvedSymbol = chart.meta?.symbol ?? searchHit?.symbol ?? symbol.toUpperCase();
+  const companyName =
+    searchHit?.longname || searchHit?.shortname || companyNameFor(resolvedSymbol);
+
   return {
-    symbol: chart.meta?.symbol ?? symbol.toUpperCase(),
+    symbol: resolvedSymbol,
+    company_name: companyName,
     quote: {
-      symbol: chart.meta?.symbol ?? symbol.toUpperCase(),
+      symbol: resolvedSymbol,
       price,
       change,
       change_percent: changePercent,
@@ -602,6 +611,49 @@ function scoreBlock(
   return { score, label, reasons, risks };
 }
 
+async function fetchYahooSearchQuote(query: string): Promise<{
+  symbol: string;
+  shortname?: string;
+  longname?: string;
+  quoteType?: string;
+} | null> {
+  const url = new URL("https://query1.finance.yahoo.com/v1/finance/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("quotesCount", "8");
+  url.searchParams.set("newsCount", "0");
+
+  const res = await fetch(url.toString(), {
+    headers: { "User-Agent": YAHOO_UA, Accept: "application/json" },
+    next: { revalidate: 300 },
+  });
+  if (!res.ok) return null;
+
+  const json = (await res.json()) as {
+    quotes?: Array<{
+      symbol?: string;
+      shortname?: string;
+      longname?: string;
+      quoteType?: string;
+      exchange?: string;
+    }>;
+  };
+
+  const quotes = json.quotes ?? [];
+  const qUpper = query.trim().toUpperCase();
+  const exact = quotes.find((q) => (q.symbol ?? "").toUpperCase() === qUpper);
+  const equity =
+    exact ??
+    quotes.find((q) => q.quoteType === "EQUITY") ??
+    quotes.find((q) => Boolean(q.symbol));
+  if (!equity?.symbol) return null;
+  return {
+    symbol: equity.symbol,
+    shortname: equity.shortname,
+    longname: equity.longname,
+    quoteType: equity.quoteType,
+  };
+}
+
 async function fetchYahooQuoteSummary(symbol: string): Promise<Record<string, unknown> | null> {
   try {
     const url = new URL(
@@ -637,7 +689,10 @@ function rawNumber(value: unknown): number | null {
 /** Full company research page payload when FastAPI is unavailable. */
 export async function yahooResearchFallback(symbol: string) {
   const analysis = await yahooAnalysisFallback(symbol);
-  const summary = await fetchYahooQuoteSummary(symbol.toUpperCase());
+  const [summary, searchHit] = await Promise.all([
+    fetchYahooQuoteSummary(symbol.toUpperCase()),
+    fetchYahooSearchQuote(symbol),
+  ]);
   const profile = (summary?.summaryProfile ?? {}) as Record<string, unknown>;
   const stats = (summary?.defaultKeyStatistics ?? {}) as Record<string, unknown>;
   const financial = (summary?.financialData ?? {}) as Record<string, unknown>;
@@ -664,7 +719,10 @@ export async function yahooResearchFallback(symbol: string) {
   const name =
     (typeof priceMod.longName === "string" && priceMod.longName) ||
     (typeof priceMod.shortName === "string" && priceMod.shortName) ||
-    companyNameFor(symbol);
+    searchHit?.longname ||
+    searchHit?.shortname ||
+    companyNameFor(symbol) ||
+    analysis.symbol;
 
   const peRatio = rawNumber(stats.trailingPE);
   const roe = rawNumber(financial.returnOnEquity);
@@ -799,7 +857,7 @@ export async function yahooResearchFallback(symbol: string) {
     equity_report: {
       bull_case: bull,
       bear_case: bear,
-      investment_thesis: `${analysis.symbol} research is running in Yahoo fallback mode. Overall technical/momentum score is ${overall ?? "n/a"}/100. Use this as a starting point, not a complete equity thesis.`,
+      investment_thesis: `${name} (${analysis.symbol}) research is running in Yahoo fallback mode. Overall technical/momentum score is ${overall ?? "n/a"}/100. Use this as a starting point, not a complete equity thesis.`,
       growth_opportunities: [
         "Confirm product/segment growth in the latest filings",
         "Watch whether price reclaims key moving averages with volume",
@@ -817,7 +875,7 @@ export async function yahooResearchFallback(symbol: string) {
     },
     explanation: {
       overall_rating: recommendationFromScore(overall) ?? "Hold",
-      investment_thesis: `Technical/momentum snapshot for ${analysis.symbol} via Yahoo Finance.`,
+      investment_thesis: `Technical/momentum snapshot for ${name} (${analysis.symbol}) via Yahoo Finance.`,
       reasons: bull,
       potential_risks: bear,
       confidence: 45,

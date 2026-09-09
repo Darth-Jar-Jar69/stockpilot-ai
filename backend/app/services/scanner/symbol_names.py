@@ -10,7 +10,7 @@ SYMBOL_NAMES: dict[str, str] = {
     "KLAC": "KLA Corp.", "MU": "Micron Technology", "ADI": "Analog Devices", "PANW": "Palo Alto Networks",
     "CRWD": "CrowdStrike", "SNOW": "Snowflake Inc.", "DDOG": "Datadog Inc.", "NET": "Cloudflare Inc.",
     "PLTR": "Palantir Technologies", "COIN": "Coinbase Global", "NOW": "ServiceNow", "INTU": "Intuit Inc.",
-    "SNPS": "Synopsys", "CDNS": "Cadence Design", "FTNT": "Fortinet", "ZS": "Zscaler", "TEAM": "Atlassian",
+    "SNPS": "Synopsys Inc.", "CDNS": "Cadence Design Systems", "FTNT": "Fortinet Inc.", "ZS": "Zscaler Inc.", "TEAM": "Atlassian Corp.",
     "WDAY": "Workday", "HUBS": "HubSpot", "VEEV": "Veeva Systems", "ACN": "Accenture", "ADP": "ADP Inc.",
     "PAYX": "Paychex", "CTSH": "Cognizant", "INFY": "Infosys", "WIT": "Wipro",
     # Semis / hardware / ADRs
