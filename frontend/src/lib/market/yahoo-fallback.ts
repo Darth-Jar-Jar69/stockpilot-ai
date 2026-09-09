@@ -270,7 +270,7 @@ export async function yahooOhlcvFallback(symbol: string, range = "6mo") {
       const volume = quote?.volume?.[i];
       if (open == null || high == null || low == null || close == null) return null;
       return {
-        time: ts,
+        timestamp: new Date(ts * 1000).toISOString(),
         open,
         high,
         low,
@@ -590,5 +590,242 @@ export async function yahooFallenGiantsFallback(limit = 10): Promise<FallenGiant
     filters_applied: { provider: "yahoo_finance", mode: "fallback", min_decline_pct: 18 },
     disclaimer:
       "Fallen Giants Yahoo fallback. Price-based only — not financial advice.",
+  };
+}
+
+function scoreBlock(
+  label: string,
+  score: number | null,
+  reasons: string[],
+  risks: string[],
+) {
+  return { score, label, reasons, risks };
+}
+
+async function fetchYahooQuoteSummary(symbol: string): Promise<Record<string, unknown> | null> {
+  try {
+    const url = new URL(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}`,
+    );
+    url.searchParams.set(
+      "modules",
+      "summaryProfile,defaultKeyStatistics,financialData,price",
+    );
+    const res = await fetch(url.toString(), {
+      headers: { "User-Agent": YAHOO_UA, Accept: "application/json" },
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      quoteSummary?: { result?: Array<Record<string, unknown>> };
+    };
+    return json.quoteSummary?.result?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function rawNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "raw" in value) {
+    const raw = (value as { raw?: unknown }).raw;
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  }
+  return null;
+}
+
+/** Full company research page payload when FastAPI is unavailable. */
+export async function yahooResearchFallback(symbol: string) {
+  const analysis = await yahooAnalysisFallback(symbol);
+  const summary = await fetchYahooQuoteSummary(symbol.toUpperCase());
+  const profile = (summary?.summaryProfile ?? {}) as Record<string, unknown>;
+  const stats = (summary?.defaultKeyStatistics ?? {}) as Record<string, unknown>;
+  const financial = (summary?.financialData ?? {}) as Record<string, unknown>;
+  const priceMod = (summary?.price ?? {}) as Record<string, unknown>;
+
+  const techScore = analysis.scores?.technical_score ?? null;
+  const momScore = analysis.scores?.momentum_score ?? null;
+  const riskScore = analysis.scores?.risk_score ?? null;
+  const overallParts = [techScore, momScore].filter((v): v is number => v != null);
+  const overall =
+    overallParts.length > 0
+      ? Math.round(overallParts.reduce((a, b) => a + b, 0) / overallParts.length)
+      : null;
+
+  const price = analysis.quote.price;
+  const sma50 = analysis.technical.sma_50;
+  const fairMid =
+    sma50 != null ? sma50 : price != null ? price * (1 + (momScore != null ? (momScore - 50) / 400 : 0)) : null;
+  const fairLow = fairMid != null ? fairMid * 0.9 : null;
+  const fairHigh = fairMid != null ? fairMid * 1.1 : null;
+  const upside =
+    price != null && fairMid != null && price !== 0 ? ((fairMid - price) / price) * 100 : null;
+
+  const name =
+    (typeof priceMod.longName === "string" && priceMod.longName) ||
+    (typeof priceMod.shortName === "string" && priceMod.shortName) ||
+    companyNameFor(symbol);
+
+  const peRatio = rawNumber(stats.trailingPE);
+  const roe = rawNumber(financial.returnOnEquity);
+  const debtToEquity = rawNumber(financial.debtToEquity);
+  const marketCap = rawNumber(priceMod.marketCap) ?? rawNumber(stats.marketCap);
+  const volume = rawNumber(priceMod.regularMarketVolume);
+
+  const rsi14 = analysis.technical.rsi_14;
+  const bull: string[] = [];
+  const bear: string[] = [];
+  if (momScore != null && momScore >= 55) bull.push("Near-term momentum is constructive on Yahoo price data.");
+  if (rsi14 != null && rsi14 < 35) bull.push("RSI is relatively washed out, which can favor mean-reversion setups.");
+  if (sma50 != null && price != null && price >= sma50) {
+    bull.push("Price is holding above the 50-day average.");
+  }
+  if (bull.length === 0) bull.push("Watch for stabilizing price action and improving breadth before sizing up.");
+
+  if (rsi14 != null && rsi14 > 70) bear.push("RSI is elevated — pullback risk is higher.");
+  if (sma50 != null && price != null && price < sma50) {
+    bear.push("Price is below the 50-day average, signaling weaker intermediate trend.");
+  }
+  if (momScore != null && momScore < 45) bear.push("Momentum score is soft on recent session moves.");
+  if (bear.length === 0) bear.push("Macro shocks and earnings surprises can invalidate a technical-only thesis.");
+
+  return {
+    symbol: analysis.symbol,
+    company_name: name,
+    quote: {
+      symbol: analysis.quote.symbol,
+      price: analysis.quote.price,
+      change: analysis.quote.change,
+      change_percent: analysis.quote.change_percent,
+      currency: analysis.quote.currency,
+      market_cap: marketCap,
+      volume,
+      previous_close: null,
+      provider: "yahoo_finance",
+      freshness: "live",
+      as_of: new Date().toISOString(),
+    },
+    fundamentals: {
+      pe_ratio: peRatio,
+      return_on_equity: roe,
+      debt_to_equity: debtToEquity,
+      sector: typeof profile.sector === "string" ? profile.sector : null,
+      industry: typeof profile.industry === "string" ? profile.industry : null,
+      description: typeof profile.longBusinessSummary === "string" ? profile.longBusinessSummary : null,
+      provider: "yahoo_finance",
+    },
+    technical: {
+      symbol: analysis.symbol,
+      rsi_14: analysis.technical.rsi_14,
+      macd: null,
+      macd_signal: null,
+      macd_histogram: analysis.technical.macd_histogram,
+      ema_12: null,
+      ema_26: null,
+      sma_20: null,
+      sma_50: analysis.technical.sma_50,
+      sma_200: null,
+      atr_14: null,
+      vwap: null,
+      bb_upper: null,
+      bb_middle: null,
+      bb_lower: null,
+      adx_14: null,
+      provider: "yahoo_finance",
+      computed_at: new Date().toISOString(),
+      data_points: analysis.technical.data_points,
+    },
+    scores: analysis.scores,
+    stockpilot_scores: {
+      overall: scoreBlock(
+        "Overall",
+        overall,
+        ["Blended from Yahoo technical + momentum signals"],
+        ["Fundamentals may be incomplete in fallback mode"],
+      ),
+      financial_health: scoreBlock(
+        "Financial Health",
+        roe != null ? Math.max(20, Math.min(90, 50 + roe * 100)) : 50,
+        roe != null ? [`ROE ${((roe ?? 0) * 100).toFixed(1)}%`] : ["Limited fundamental fields from Yahoo"],
+        ["Balance-sheet depth requires full backend research"],
+      ),
+      growth: scoreBlock(
+        "Growth",
+        momScore,
+        ["Proxy from recent price momentum"],
+        ["Not a substitute for revenue/EPS growth analysis"],
+      ),
+      value: scoreBlock(
+        "Value",
+        peRatio != null && peRatio > 0 ? Math.max(15, Math.min(85, 80 - peRatio)) : 50,
+        peRatio != null ? [`Trailing P/E ${peRatio.toFixed(1)}`] : ["P/E unavailable"],
+        ["Valuation models are simplified in fallback mode"],
+      ),
+      quality: scoreBlock(
+        "Quality",
+        techScore,
+        ["Technical structure quality from RSI / SMA context"],
+        ["Does not measure moat or accounting quality"],
+      ),
+      momentum: scoreBlock(
+        "Momentum",
+        momScore,
+        ["Derived from recent % change"],
+        ["Short-term noise can distort momentum"],
+      ),
+      risk: scoreBlock(
+        "Risk",
+        riskScore,
+        ["Derived from RSI extremity"],
+        ["Does not include drawdown/volatility regime fully"],
+      ),
+    },
+    fair_value: {
+      current_price: price,
+      fair_value_low: fairLow,
+      fair_value_mid: fairMid,
+      fair_value_high: fairHigh,
+      upside_percent: upside,
+      methods: [
+        {
+          name: "SMA50 anchor",
+          estimate: fairMid,
+          note: "Lightweight technical anchor while FastAPI research is offline",
+        },
+      ],
+      confidence: 40,
+      disclaimer: "Yahoo fallback fair-value band — illustrative only, not a valuation model.",
+    },
+    equity_report: {
+      bull_case: bull,
+      bear_case: bear,
+      investment_thesis: `${analysis.symbol} research is running in Yahoo fallback mode. Overall technical/momentum score is ${overall ?? "n/a"}/100. Use this as a starting point, not a complete equity thesis.`,
+      growth_opportunities: [
+        "Confirm product/segment growth in the latest filings",
+        "Watch whether price reclaims key moving averages with volume",
+      ],
+      competitive_advantages: [
+        typeof profile.sector === "string"
+          ? `Operates in ${profile.sector}${typeof profile.industry === "string" ? ` / ${profile.industry}` : ""}`
+          : "Review competitive positioning in company filings",
+      ],
+      main_risks: bear,
+      catalysts: ["Upcoming earnings", "Sector rotation / macro risk appetite"],
+      concerns: ["Fallback mode cannot fully verify fundamentals or analyst models"],
+      stockpilot_rating: overall,
+      moat_assessment: "Moat not scored in Yahoo fallback — qualitative only.",
+    },
+    explanation: {
+      overall_rating: recommendationFromScore(overall) ?? "Hold",
+      investment_thesis: `Technical/momentum snapshot for ${analysis.symbol} via Yahoo Finance.`,
+      reasons: bull,
+      potential_risks: bear,
+      confidence: 45,
+    },
+    data_warnings: [
+      "Company research served via Yahoo Finance fallback (FastAPI research API not linked).",
+    ],
+    disclaimer:
+      "Probabilistic estimates only — not financial advice. Past performance does not guarantee future results.",
   };
 }

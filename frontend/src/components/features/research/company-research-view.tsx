@@ -46,7 +46,7 @@ export function CompanyResearchView({ symbol }: { symbol: string }) {
         setResearch(await researchRes.json());
         if (ohlcvRes.ok) setOhlcv(await ohlcvRes.json());
       } catch {
-        setError("Failed to load research. Is the backend running?");
+        setError("Failed to load research. Please refresh and try again.");
       } finally {
         setLoading(false);
       }

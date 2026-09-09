@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
 
 type YahooOhlcvBar = {
-  time: string;
+  timestamp: string;
   open: number;
   high: number;
   low: number;
@@ -72,7 +72,7 @@ async function yahooOhlcvFallback(symbol: string, period: string, interval: stri
     const volume = quote.volume?.[i];
     if ([open, high, low, close].some((v) => v == null)) continue;
     bars.push({
-      time: new Date(timestamps[i]! * 1000).toISOString().slice(0, 10),
+      timestamp: new Date(timestamps[i]! * 1000).toISOString(),
       open: open!,
       high: high!,
       low: low!,

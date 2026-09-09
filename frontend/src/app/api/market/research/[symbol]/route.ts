@@ -1,22 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { backendErrorMessage, fetchBackendJson, isBackendConfigured } from "@/lib/backend";
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooResearchFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ symbol: string }> },
 ) {
   const { symbol } = await params;
-
-  if (!isBackendConfigured()) {
-    return NextResponse.json(
-      {
-        error: "Full company research requires the FastAPI backend. Try the Analysis page for Yahoo fallback data.",
-        code: "backend_not_configured",
-      },
-      { status: 503 },
-    );
-  }
 
   try {
     const { ok, status, data } = await fetchBackendJson({
@@ -28,14 +19,25 @@ export async function GET(
       return NextResponse.json(data);
     }
 
-    return NextResponse.json(
-      { error: backendErrorMessage(data, "Research unavailable.") },
-      { status },
-    );
+    try {
+      return NextResponse.json(await yahooResearchFallback(symbol));
+    } catch {
+      return NextResponse.json(
+        { error: backendErrorMessage(data, "Research unavailable.") },
+        { status },
+      );
+    }
   } catch {
-    return NextResponse.json(
-      { error: "Research unavailable. Backend is unreachable." },
-      { status: 503 },
-    );
+    try {
+      return NextResponse.json(await yahooResearchFallback(symbol));
+    } catch {
+      return NextResponse.json(
+        {
+          error: "Company research is temporarily unavailable. Please try again shortly.",
+          code: "backend_unavailable",
+        },
+        { status: 503 },
+      );
+    }
   }
 }
