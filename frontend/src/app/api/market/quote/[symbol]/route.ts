@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooQuoteFallback } from "@/lib/market/yahoo-fallback";
 
-/** Proxy to FastAPI — keeps backend URL server-side. */
+/** Proxy to FastAPI — falls back to Yahoo Finance if the backend is down. */
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ symbol: string }> },
@@ -10,27 +11,34 @@ export async function GET(
   const { symbol } = await params;
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/quotes/${encodeURIComponent(symbol)}`, {
-      next: { revalidate: 30 },
+    const { ok, status, data } = await fetchBackendJson({
+      path: `/api/v1/quotes/${encodeURIComponent(symbol)}`,
+      revalidate: 30,
     });
-    const data = await res.json();
 
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: data.detail?.message ?? data.message ?? "Market data unavailable." },
-        { status: res.status },
-      );
+    if (ok) {
+      return NextResponse.json(data);
     }
 
-    return NextResponse.json(data);
+    try {
+      return NextResponse.json(await yahooQuoteFallback(symbol));
+    } catch {
+      return NextResponse.json(
+        { error: backendErrorMessage(data, "Market data unavailable.") },
+        { status },
+      );
+    }
   } catch {
-    return NextResponse.json(
-      {
-        error:
-          "Backend unavailable. Start the FastAPI server on port 8000.",
-        code: "backend_unavailable",
-      },
-      { status: 503 },
-    );
+    try {
+      return NextResponse.json(await yahooQuoteFallback(symbol));
+    } catch {
+      return NextResponse.json(
+        {
+          error: "Market data is temporarily unavailable. Please try again shortly.",
+          code: "backend_unavailable",
+        },
+        { status: 503 },
+      );
+    }
   }
 }

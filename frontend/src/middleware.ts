@@ -21,6 +21,10 @@ export async function middleware(request: NextRequest) {
 
   const session = await getSessionFromRequest(request);
   if (!session) {
+    // API callers expect JSON, not an HTML redirect
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     const signInUrl = new URL("/sign-in", request.url);
     signInUrl.searchParams.set("redirect", pathname);
     return NextResponse.redirect(signInUrl);

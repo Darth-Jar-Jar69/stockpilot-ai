@@ -6,8 +6,9 @@ import {
   getUserByEmail,
   setPendingVerification,
 } from "@/lib/auth/store";
+import { sendVerificationEmail } from "@/lib/email";
 
-/** Start sign-up — sends a 6-digit email verification code. */
+/** Start sign-up — emails a 6-digit verification code (inline fallback if email is not configured). */
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -41,13 +42,19 @@ export async function POST(request: Request) {
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
+    const delivery = await sendVerificationEmail(email, code);
+
     const response: Record<string, unknown> = {
-      message: "Verification code sent. Check your email.",
       needsVerification: true,
+      emailDelivery: delivery.mode,
     };
 
-    // Dev helper — show code on screen until real email is wired up
-    if (process.env.NODE_ENV === "development") {
+    if (delivery.mode === "email") {
+      response.message = "Verification code sent. Check your email (and spam folder).";
+    } else {
+      // Keep signup usable until RESEND_API_KEY is configured on the host.
+      response.message =
+        "Email delivery is not configured yet — use the code shown below to verify.";
       response.devCode = code;
     }
 

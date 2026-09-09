@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { Logo } from "@/components/layout/logo";
-import { AI_ASSISTANT_LABEL, SITE_TAGLINE } from "@/lib/branding";
+import { AI_ASSISTANT_LABEL } from "@/lib/branding";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 /** Branded wrapper for custom auth forms. */
@@ -23,7 +23,6 @@ export function AuthFormShell({
           <Link href="/" className="mx-auto inline-flex">
             <Logo showTagline />
           </Link>
-          <p className="text-xs font-medium text-primary">{SITE_TAGLINE}</p>
           <CardTitle className="text-2xl font-bold tracking-tight text-white">{title}</CardTitle>
           <CardDescription className="text-base leading-relaxed text-slate-300">
             {description}

@@ -22,12 +22,14 @@ from app.schemas.fallen_giants import (
 )
 from app.services.fundamentals.extended import fetch_extended_fundamentals
 from app.services.market_data.service import market_data_service
+from app.services.market_data.yahoo import YahooFinanceProvider
 from app.services.scanner.symbol_names import SYMBOL_NAMES
 from app.services.scanner.universe import SCANNER_UNIVERSE
 
 logger = logging.getLogger("stockpilot.fallen_giants")
 
-_CONCURRENCY = 8
+_CONCURRENCY = 6
+_yahoo = YahooFinanceProvider()
 _cache: TTLCache[FallenGiantsResponse] = TTLCache()
 
 # Prefer liquid mega/large names first for faster, higher-quality scans
@@ -370,9 +372,8 @@ class FallenGiantsService:
             return cached
 
         lookback = filters.max_days_since_crash or 90
-        universe = list(dict.fromkeys([*_PRIORITY, *SCANNER_UNIVERSE]))
+        scan_list = list(dict.fromkeys(_PRIORITY))[:40]
 
-        # Benchmark once
         spy_bars = []
         try:
             spy = await market_data_service.get_ohlcv("SPY", period="6mo", interval="1d")
@@ -381,49 +382,94 @@ class FallenGiantsService:
             logger.warning("SPY OHLCV unavailable for relative decline")
 
         sem = asyncio.Semaphore(_CONCURRENCY)
-        candidates: list[FallenGiantCandidate] = []
 
-        async def process(symbol: str) -> FallenGiantCandidate | None:
+        @dataclass
+        class _Hit:
+            symbol: str
+            provider: str
+            mcap: float | None
+            dd: _Drawdown
+            relative: float | None
+
+        async def phase1(symbol: str) -> _Hit | None:
+            """Fast pass: Yahoo quote + OHLCV drawdown (avoids Finnhub rate limits)."""
             async with sem:
                 try:
-                    quote = await market_data_service.get_quote(symbol)
-                    mcap = quote.market_cap
-                    # Yahoo often omits market_cap on Finnhub quotes — try OHLCV path then fund
-                    ohlcv = await market_data_service.get_ohlcv(symbol, period="6mo", interval="1d")
-                    dd = _find_drawdown(ohlcv.bars, lookback, filters.min_decline)
+                    quote = await asyncio.wait_for(_yahoo.get_quote(symbol), timeout=12)
+                    bars = await asyncio.wait_for(
+                        _yahoo.get_ohlcv(symbol, period="6mo", interval="1d"),
+                        timeout=15,
+                    )
+                    dd = _find_drawdown(bars, lookback, filters.min_decline)
                     if dd is None:
                         return None
+                    relative = _spy_decline_over(spy_bars, dd.peak_date, dd.trough_date)
+                    return _Hit(
+                        symbol=symbol,
+                        provider=quote.provider,
+                        mcap=quote.market_cap,
+                        dd=dd,
+                        relative=relative,
+                    )
+                except Exception as exc:
+                    logger.debug("Fallen Giants phase1 skip %s: %s", symbol, exc)
+                    return None
+
+        hits = [h for h in await asyncio.gather(*(phase1(s) for s in scan_list)) if h]
+        hits.sort(key=lambda h: h.dd.decline_pct, reverse=True)
+        enrich_budget = max(filters.limit, 10)
+        shortlist = hits[:enrich_budget]
+
+        async def phase2(hit: _Hit) -> FallenGiantCandidate | None:
+            """Enrich only shortlisted drawdowns with news + fundamentals."""
+            async with sem:
+                try:
+                    symbol = hit.symbol
+                    dd = hit.dd
+                    mcap = hit.mcap
 
                     fund = None
                     try:
-                        fund = await fetch_extended_fundamentals(symbol)
-                    except MarketDataError:
+                        fund = await asyncio.wait_for(
+                            fetch_extended_fundamentals(symbol),
+                            timeout=8,
+                        )
+                    except (MarketDataError, asyncio.TimeoutError, Exception):
                         pass
 
-                    if mcap is None and fund and fund.shares_outstanding and quote.price:
-                        mcap = fund.shares_outstanding * quote.price
+                    if mcap is None and fund and fund.shares_outstanding and dd.current_price:
+                        mcap = fund.shares_outstanding * dd.current_price
                     if mcap is None and fund and fund.enterprise_value:
-                        # rough fallback — not ideal but better than dropping names
                         mcap = fund.enterprise_value
                     if filters.min_market_cap and mcap is not None and mcap < filters.min_market_cap:
                         return None
-                    # If market cap unknown, only keep priority liquid names
                     if mcap is None and symbol not in _PRIORITY:
                         return None
 
                     news_start = dd.peak_date - timedelta(days=3)
                     news_end = dd.trough_date + timedelta(days=5)
-                    sources = await _fetch_finnhub_news(symbol, news_start, news_end)
+                    sources: list[FallenGiantSource] = []
+                    try:
+                        sources = await asyncio.wait_for(
+                            _fetch_finnhub_news(symbol, news_start, news_end),
+                            timeout=6,
+                        )
+                    except Exception:
+                        sources = []
                     if not sources:
-                        sources = await _fetch_newsapi(symbol)
+                        try:
+                            sources = await asyncio.wait_for(_fetch_newsapi(symbol), timeout=6)
+                        except Exception:
+                            sources = []
 
                     blob = " ".join(f"{s.title} {s.source or ''}" for s in sources)
                     catalyst_type, catalyst_label = _classify_catalyst(blob)
                     if sources:
-                        # Prefer headline closest to trough
                         best_src = min(
                             sources,
-                            key=lambda s: abs((s.published_at or dd.trough_date) - dd.trough_date).total_seconds()
+                            key=lambda s: abs(
+                                (s.published_at or dd.trough_date) - dd.trough_date
+                            ).total_seconds()
                             if s.published_at
                             else 10**12,
                         )
@@ -433,7 +479,6 @@ class FallenGiantsService:
 
                     health, valuation, risk = _score_fundamentals(fund)
 
-                    # Catalyst clarity 0-15
                     clarity = 4.0
                     if sources:
                         clarity += 6
@@ -441,18 +486,15 @@ class FallenGiantsService:
                         clarity += 5
                     clarity = _clamp(clarity, 0, 15)
 
-                    # Price dislocation 0-20
                     dislocation = _clamp((dd.decline_pct - filters.min_decline) / 2.0, 0, 12)
                     if dd.selloff_days <= 3:
                         dislocation += 6
                     elif dd.selloff_days <= 10:
                         dislocation += 3
-                    relative = _spy_decline_over(spy_bars, dd.peak_date, dd.trough_date)
-                    if relative is not None and dd.decline_pct > relative + 8:
+                    if hit.relative is not None and dd.decline_pct > hit.relative + 8:
                         dislocation += 2
                     dislocation = _clamp(dislocation, 0, 20)
 
-                    # Recovery potential 0-20 (want incomplete recovery + healthy biz)
                     recovery = 0.0
                     if dd.recovered_pct < 35:
                         recovery += 10
@@ -461,7 +503,7 @@ class FallenGiantsService:
                     elif dd.recovered_pct < 85:
                         recovery += 3
                     else:
-                        recovery += 1  # already mostly recovered
+                        recovery += 1
                     recovery += _clamp((health - 50) / 5, -4, 6)
                     if catalyst_type in {"earnings_miss", "guidance_cut", "other"} and health >= 55:
                         recovery += 3
@@ -469,14 +511,9 @@ class FallenGiantsService:
                         recovery -= 4
                     recovery = _clamp(recovery, 0, 20)
 
-                    # Fundamental strength contributes 25 points (scale health)
                     fund_points = health * 0.25
-                    # Valuation 10 points
                     val_points = valuation * 0.10
-                    # Risk reduces up to 10 points (invert structural risk)
                     risk_points = (100 - risk) * 0.10
-
-                    # Permanent damage penalty on total
                     total = clarity + dislocation + fund_points + recovery + val_points + risk_points
                     if catalyst_type in {"financial_warning", "regulatory"} and risk >= 70:
                         total *= 0.75
@@ -494,13 +531,15 @@ class FallenGiantsService:
                         fund=fund,
                         health=health,
                         risk=risk,
-                        relative_spy=relative,
+                        relative_spy=hit.relative,
                         sources=sources,
                     )
 
                     warnings: list[str] = []
                     if not sources:
-                        warnings.append("No catalyst headlines found near the selloff window — clarity reduced.")
+                        warnings.append(
+                            "No catalyst headlines found near the selloff window — clarity reduced."
+                        )
                     if mcap is None:
                         warnings.append("Market cap unavailable from quote providers.")
 
@@ -531,22 +570,18 @@ class FallenGiantsService:
                         recovery_confirmations=confirms,
                         sources=sources[:5],
                         sector=fund.sector if fund else None,
-                        relative_to_spy_decline=relative,
+                        relative_to_spy_decline=hit.relative,
                         days_since_catalyst=days_since,
                         selloff_days=dd.selloff_days,
-                        provider=quote.provider,
+                        provider=hit.provider,
                         data_warnings=warnings,
                     )
                 except Exception as exc:
-                    logger.debug("Fallen Giants skip %s: %s", symbol, exc)
+                    logger.debug("Fallen Giants phase2 skip %s: %s", hit.symbol, exc)
                     return None
 
-        # Scan priority first (quality), then fill from remaining universe
-        scan_list = universe[:160]
-        results = await asyncio.gather(*(process(sym) for sym in scan_list))
-        candidates = [r for r in results if r is not None]
+        candidates = [r for r in await asyncio.gather(*(phase2(h) for h in shortlist)) if r]
 
-        # Filters
         filtered: list[FallenGiantCandidate] = []
         for item in candidates:
             if filters.catalyst_type and item.catalyst_type != filters.catalyst_type:
@@ -574,10 +609,9 @@ class FallenGiantsService:
             filtered.append(item)
 
         sort_key = filters.sort_by
-        reverse = True
         filtered.sort(
             key=lambda x: (getattr(x, sort_key) is not None, getattr(x, sort_key) or 0),
-            reverse=reverse,
+            reverse=True,
         )
         ranked = filtered[: filters.limit]
 
@@ -585,6 +619,7 @@ class FallenGiantsService:
             "min_decline": filters.min_decline,
             "sort_by": filters.sort_by,
             "scanned": len(scan_list),
+            "drawdowns_found": len(hits),
             "candidates": len(candidates),
             "returned": len(ranked),
         }

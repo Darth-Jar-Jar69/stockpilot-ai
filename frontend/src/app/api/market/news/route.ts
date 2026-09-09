@@ -6,7 +6,9 @@ import {
 } from "@/lib/news-tickers";
 import type { NewsArticle, NewsStockMention } from "@/types/scanner";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { getBackendUrl } from "@/lib/backend";
+
+const API_URL = getBackendUrl();
 
 type QuoteSnapshot = {
   price: number | null;

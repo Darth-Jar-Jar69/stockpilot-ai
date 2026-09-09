@@ -1,20 +1,32 @@
 import { NextResponse } from "next/server";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooHealthFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET() {
   try {
-    const res = await fetch(`${API_URL}/api/v1/health`, { next: { revalidate: 15 } });
-    const data = await res.json();
-    return NextResponse.json(data, { status: res.status });
-  } catch {
+    const { ok, status, data } = await fetchBackendJson({
+      path: "/api/v1/health",
+      revalidate: 15,
+    });
+
+    if (ok) {
+      return NextResponse.json(data, { status });
+    }
+
+    // Backend up but unhealthy — still try Yahoo so the dashboard isn't blank
+    const fallback = await yahooHealthFallback();
     return NextResponse.json(
       {
-        status: "offline",
-        providers: [],
-        error: "FastAPI backend not reachable at " + (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"),
+        ...fallback,
+        error: backendErrorMessage(data, "Backend health check failed."),
       },
-      { status: 503 },
+      { status: 200 },
     );
+  } catch {
+    const fallback = await yahooHealthFallback();
+    return NextResponse.json(fallback, {
+      status: fallback.status === "ok" ? 200 : 503,
+    });
   }
 }

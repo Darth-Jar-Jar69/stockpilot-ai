@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/db";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { getBackendUrl } from "@/lib/backend";
+
+const API_URL = getBackendUrl();
 
 export async function GET() {
   const session = await getSession();

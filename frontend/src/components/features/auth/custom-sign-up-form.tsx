@@ -109,14 +109,19 @@ export function CustomSignUpForm() {
           </>
         }
       >
-        {devCode && (
+        {devCode ? (
           <div className="rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-slate-200">
-            <span className="font-medium text-white">Dev code:</span>{" "}
+            <span className="font-medium text-white">Your code:</span>{" "}
             <span className="font-mono text-lg tracking-widest text-primary">{devCode}</span>
             <p className="mt-1 text-xs text-slate-400">
-              Real email delivery comes later — use this code for now.
+              Email delivery isn&apos;t configured on the server yet, so the code is shown here.
             </p>
           </div>
+        ) : (
+          <p className="rounded-lg border border-border/50 bg-secondary/40 px-4 py-3 text-sm text-slate-300">
+            We emailed a 6-digit code to <span className="text-white">{email}</span>. Check inbox
+            and spam.
+          </p>
         )}
 
         <form onSubmit={handleVerify} className="space-y-4">

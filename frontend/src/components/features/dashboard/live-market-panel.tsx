@@ -65,14 +65,23 @@ export function LiveMarketPanel() {
         setHealth(healthData);
 
         if (!analysisRes.ok) {
-          const err = await analysisRes.json();
-          setError(err.error ?? "Unable to load market data.");
+          const err = await analysisRes.json().catch(() => ({}));
+          setError(
+            typeof err.error === "string"
+              ? err.error
+              : "Unable to load market data. Please refresh in a moment.",
+          );
           setAnalysis(null);
         } else {
-          setAnalysis(await analysisRes.json());
+          const payload = await analysisRes.json();
+          setAnalysis(payload);
+          if (Array.isArray(payload.data_warnings) && payload.data_warnings.length > 0) {
+            // Soft notice only — data still rendered from fallback providers
+            setError(undefined);
+          }
         }
       } catch {
-        setError("Failed to connect to market data services.");
+        setError("Failed to connect to market data services. Please refresh the page.");
       } finally {
         setLoading(false);
       }
@@ -103,9 +112,6 @@ export function LiveMarketPanel() {
             <div>
               <p className="font-medium text-amber-100">Market data unavailable</p>
               <p className="text-sm text-amber-200/80">{error}</p>
-              <p className="mt-1 text-xs text-slate-400">
-                Run: <code className="text-slate-300">cd backend &amp;&amp; py -m uvicorn app.main:app --reload</code>
-              </p>
             </div>
           </CardContent>
         </Card>
@@ -181,7 +187,11 @@ export function LiveMarketPanel() {
             >
               {p.name}: {p.status}
             </Badge>
-          )) ?? <span className="text-slate-400">Backend offline</span>}
+          )) ?? (
+            <span className="text-slate-400">
+              {health?.error ?? "Waiting for provider status…"}
+            </span>
+          )}
         </CardContent>
       </Card>
     </div>

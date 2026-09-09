@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooAnalysisFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET(
   _request: Request,
@@ -9,23 +10,37 @@ export async function GET(
   const { symbol } = await params;
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/analysis/${encodeURIComponent(symbol)}`, {
-      next: { revalidate: 60 },
+    const { ok, status, data } = await fetchBackendJson({
+      path: `/api/v1/analysis/${encodeURIComponent(symbol)}`,
+      revalidate: 60,
     });
-    const data = await res.json();
 
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: data.detail?.message ?? data.message ?? "Analysis unavailable." },
-        { status: res.status },
-      );
+    if (ok) {
+      return NextResponse.json(data);
     }
 
-    return NextResponse.json(data);
+    // Prefer Yahoo fallback over surfacing Railway 502 noise
+    try {
+      const fallback = await yahooAnalysisFallback(symbol);
+      return NextResponse.json(fallback);
+    } catch {
+      return NextResponse.json(
+        { error: backendErrorMessage(data, "Analysis unavailable.") },
+        { status },
+      );
+    }
   } catch {
-    return NextResponse.json(
-      { error: "Backend unavailable. Start the FastAPI server on port 8000.", code: "backend_unavailable" },
-      { status: 503 },
-    );
+    try {
+      const fallback = await yahooAnalysisFallback(symbol);
+      return NextResponse.json(fallback);
+    } catch {
+      return NextResponse.json(
+        {
+          error: "Market data is temporarily unavailable. Please try again shortly.",
+          code: "backend_unavailable",
+        },
+        { status: 503 },
+      );
+    }
   }
 }

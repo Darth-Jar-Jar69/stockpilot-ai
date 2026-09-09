@@ -12,7 +12,9 @@ import { prisma } from "@/lib/db";
 import { computePaperPositions, getOrCreateUserProfile } from "@/lib/paper-trading";
 import type { PaperAccountState, PaperPosition, PaperTradeRow } from "@/types/paper-trading";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { getBackendUrl } from "@/lib/backend";
+
+const API_URL = getBackendUrl();
 
 type QuoteData = {
   price: number;
@@ -28,16 +30,33 @@ async function fetchQuote(symbol: string): Promise<QuoteData | null> {
     const res = await fetch(`${API_URL}/api/v1/quotes/${encodeURIComponent(symbol)}`, {
       cache: "no-store",
     });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (typeof data.price !== "number") return null;
+    if (res.ok) {
+      const data = await res.json();
+      if (typeof data.price === "number") {
+        return {
+          price: data.price,
+          change: data.change ?? null,
+          change_percent: data.change_percent ?? null,
+          previous_close: data.previous_close ?? null,
+          volume: data.volume ?? null,
+          as_of: data.as_of ?? new Date().toISOString(),
+        };
+      }
+    }
+  } catch {
+    // fall through to Yahoo
+  }
+
+  try {
+    const { yahooQuoteFallback } = await import("@/lib/market/yahoo-fallback");
+    const data = await yahooQuoteFallback(symbol);
     return {
       price: data.price,
-      change: data.change ?? null,
-      change_percent: data.change_percent ?? null,
-      previous_close: data.previous_close ?? null,
-      volume: data.volume ?? null,
-      as_of: data.as_of ?? new Date().toISOString(),
+      change: data.change,
+      change_percent: data.change_percent,
+      previous_close: data.change != null ? data.price - data.change : null,
+      volume: null,
+      as_of: new Date().toISOString(),
     };
   } catch {
     return null;

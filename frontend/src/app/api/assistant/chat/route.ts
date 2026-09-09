@@ -8,7 +8,9 @@ import {
 import { generateAssistantFallback } from "@/lib/assistant-fallback";
 import { getSession } from "@/lib/auth/session";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { getBackendUrl } from "@/lib/backend";
+
+const API_URL = getBackendUrl();
 const BACKEND_TIMEOUT_MS = 8000;
 
 async function tryBackendReply(
