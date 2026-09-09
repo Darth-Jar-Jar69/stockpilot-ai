@@ -23,6 +23,13 @@ export function PaperTradingView() {
   const [error, setError] = useState<string>();
   const [funding, setFunding] = useState(false);
 
+  // Deep link: /paper-trading?symbol=NVDA
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sym = new URLSearchParams(window.location.search).get("symbol");
+    if (sym) setSymbol(sym.toUpperCase());
+  }, []);
+
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     setError(undefined);

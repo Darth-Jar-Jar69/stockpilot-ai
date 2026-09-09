@@ -9,12 +9,14 @@ export async function GET(request: Request) {
   const symbol = searchParams.get("symbol");
   const desk = (searchParams.get("desk") as NewsDesk | "all" | null) ?? "all";
   const limit = Number(searchParams.get("limit") ?? "28");
+  const page = Number(searchParams.get("page") ?? "0");
 
   try {
     const deskData = await fetchMarketNewsDesk({
       limit,
       symbol,
       desk: desk || "all",
+      page: Number.isFinite(page) ? page : 0,
     });
     return NextResponse.json(deskData, {
       headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=120" },

@@ -348,38 +348,159 @@ function dedupe(articles: EnrichedNewsArticle[]): EnrichedNewsArticle[] {
   return out;
 }
 
-export async function fetchMarketNewsDesk(options?: {
-  limit?: number;
-  symbol?: string | null;
-  desk?: NewsDesk | "all";
-}): Promise<{
+/** Rotating topical queries used to keep the feed going page after page. */
+const QUERY_POOL = [
+  "semiconductor stocks", "bank earnings", "treasury yields", "bitcoin crypto market", "housing market mortgage rates",
+  "retail sales consumer spending", "electric vehicles Tesla", "FDA approval pharma", "artificial intelligence stocks",
+  "cloud computing earnings", "dividend stocks", "small cap stocks Russell", "gold price", "dollar index forex",
+  "China economy stocks", "Europe stocks ECB", "Japan Nikkei yen", "airline stocks", "defense stocks",
+  "streaming media stocks", "cybersecurity stocks", "biotech stocks", "utilities stocks rates", "REIT real estate stocks",
+  "insider buying", "short squeeze", "stock buyback", "stock split", "analyst upgrade downgrade", "guidance cut warning",
+  "layoffs restructuring", "antitrust lawsuit tech", "tariffs trade", "jobs report unemployment", "CPI inflation report",
+  "oil prices OPEC", "natural gas prices", "lithium copper mining stocks", "apple iphone", "nvidia data center",
+  "microsoft azure openai", "amazon aws", "alphabet google search", "meta platforms ads", "netflix subscribers",
+];
+
+/** Liquid names whose Finnhub company-news feeds are deep enough to page through indefinitely. */
+const FEED_UNIVERSE = [
+  "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "JPM", "V", "UNH", "LLY", "XOM", "COST", "HD",
+  "NFLX", "AMD", "ORCL", "CRM", "ADBE", "INTU", "NOW", "PANW", "CRWD", "SNPS", "CDNS", "ASML", "TSM", "BAC", "GS",
+  "MS", "WFC", "PFE", "MRK", "ABBV", "JNJ", "CVX", "COP", "BA", "CAT", "DE", "GE", "HON", "UPS", "DIS", "NKE", "SBUX",
+  "MCD", "KO", "PEP", "WMT", "TGT", "PYPL", "SQ", "SHOP", "UBER", "ABNB", "COIN", "PLTR", "ARM", "MU", "QCOM", "TXN",
+];
+
+async function fetchFinnhubCompanyNews(
+  symbol: string,
+  fromDaysAgo: number,
+  toDaysAgo: number,
+  limit: number,
+): Promise<EnrichedNewsArticle[]> {
+  const token = process.env.FINNHUB_API_KEY?.trim();
+  if (!token) return [];
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const to = new Date(Date.now() - toDaysAgo * 86_400_000);
+  const from = new Date(Date.now() - fromDaysAgo * 86_400_000);
+
+  const url = new URL("https://finnhub.io/api/v1/company-news");
+  url.searchParams.set("symbol", symbol);
+  url.searchParams.set("from", fmt(from));
+  url.searchParams.set("to", fmt(to));
+  url.searchParams.set("token", token);
+
+  try {
+    const res = await fetch(url.toString(), {
+      headers: { Accept: "application/json" },
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as Array<{
+      id?: number;
+      headline?: string;
+      summary?: string;
+      source?: string;
+      url?: string;
+      image?: string;
+      datetime?: number;
+      related?: string;
+    }>;
+
+    return (json ?? []).slice(0, limit).map((item, idx) => {
+      const title = item.headline ?? "Untitled";
+      const summary = item.summary ?? null;
+      const text = `${title} ${summary ?? ""}`;
+      const related = (item.related ?? "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+      const symbols = [...new Set([symbol, ...related, ...extractTickersFromText(text)])].slice(0, 6);
+      const sentiment = classifySentiment(text);
+      const desk = classifyDesk(text, "markets");
+      const published_at = item.datetime != null ? new Date(item.datetime * 1000).toISOString() : null;
+      return {
+        id: `finnhub-co-${item.id ?? `${symbol}-${idx}`}`,
+        title,
+        source: item.source ?? "Finnhub",
+        url: item.url ?? null,
+        published_at,
+        summary,
+        image_url: item.image || null,
+        symbols,
+        related_stocks: symbols.map((s) => ({ symbol: s, company_name: companyNameFor(s), price: null, change_percent: null })),
+        sentiment,
+        desk,
+        importance: importanceScore({ title, published_at, symbols, source: item.source ?? null, hasImage: Boolean(item.image) }),
+        why_it_matters: whyItMatters(title, symbols, sentiment, desk),
+        provider: "finnhub",
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function rotate<T>(pool: readonly T[], page: number, perPage: number): T[] {
+  const out: T[] = [];
+  for (let i = 0; i < perPage; i++) out.push(pool[((page - 1) * perPage + i) % pool.length]!);
+  return out;
+}
+
+export type NewsDeskPayload = {
   as_of: string;
+  page: number;
+  has_more: boolean;
   lead: EnrichedNewsArticle | null;
   articles: EnrichedNewsArticle[];
   pulse: { desk: NewsDesk; count: number; sentiment: NewsSentiment }[];
   movers: { symbol: string; company_name: string | null; change_percent: number | null; price: number | null }[];
-}> {
+};
+
+export async function fetchMarketNewsDesk(options?: {
+  limit?: number;
+  symbol?: string | null;
+  desk?: NewsDesk | "all";
+  page?: number;
+}): Promise<NewsDeskPayload> {
   const limit = Math.min(Math.max(options?.limit ?? 28, 8), 40);
+  const page = Math.max(0, Math.floor(options?.page ?? 0));
   const symbolFilter = options?.symbol?.trim().toUpperCase() || null;
   const deskFilter = options?.desk && options.desk !== "all" ? options.desk : null;
 
-  const [finnhub, ...yahooDesks] = await Promise.all([
-    fetchFinnhubGeneral(20),
-    ...DESK_QUERIES.map((d) => fetchYahooDesk(d.desk, d.q, 8)),
-  ]);
+  let merged: EnrichedNewsArticle[];
 
-  let merged = dedupe([...finnhub, ...yahooDesks.flat()]);
+  if (page === 0) {
+    const [finnhub, ...yahooDesks] = await Promise.all([
+      fetchFinnhubGeneral(24),
+      ...DESK_QUERIES.map((d) => fetchYahooDesk(d.desk, d.q, 8)),
+    ]);
+    merged = dedupe([...finnhub, ...yahooDesks.flat()]);
 
-  if (symbolFilter) {
-    merged = merged.filter(
-      (a) =>
-        a.symbols.includes(symbolFilter) ||
-        a.title.toUpperCase().includes(symbolFilter) ||
-        (a.summary ?? "").toUpperCase().includes(symbolFilter),
-    );
-    // Also pull symbol-specific Yahoo search
-    const focused = await fetchYahooDesk("markets", symbolFilter, 12);
-    merged = dedupe([...focused, ...merged]);
+    if (symbolFilter) {
+      merged = merged.filter(
+        (a) =>
+          a.symbols.includes(symbolFilter) ||
+          a.title.toUpperCase().includes(symbolFilter) ||
+          (a.summary ?? "").toUpperCase().includes(symbolFilter),
+      );
+      const [focused, company] = await Promise.all([
+        fetchYahooDesk("markets", symbolFilter, 12),
+        fetchFinnhubCompanyNews(symbolFilter, 10, 0, 20),
+      ]);
+      merged = dedupe([...company, ...focused, ...merged]);
+    }
+  } else if (symbolFilter) {
+    // Deep history for one ticker: each page walks another 10-day window back in time.
+    const company = await fetchFinnhubCompanyNews(symbolFilter, (page + 1) * 10, page * 10, 30);
+    merged = dedupe(company);
+  } else {
+    // Infinite general feed: rotate topical Yahoo queries, page deeper into Finnhub general,
+    // and pull company wires for a rotating slice of liquid names.
+    const queries = rotate(QUERY_POOL, page, 3);
+    const symbols = rotate(FEED_UNIVERSE, page, 4);
+    const generalOffset = 24 + (page - 1) * 12;
+
+    const [general, ...rest] = await Promise.all([
+      fetchFinnhubGeneral(generalOffset + 12).then((all) => all.slice(generalOffset)),
+      ...queries.map((q) => fetchYahooDesk(classifyDesk(q, "markets"), q, 12)),
+      ...symbols.map((s) => fetchFinnhubCompanyNews(s, 10, 0, 5)),
+    ]);
+    merged = dedupe([...general, ...rest.flat()]);
   }
 
   if (deskFilter) {
@@ -389,6 +510,8 @@ export async function fetchMarketNewsDesk(options?: {
   merged.sort((a, b) => b.importance - a.importance || (b.published_at ?? "").localeCompare(a.published_at ?? ""));
   const top = merged.slice(0, limit);
   const enriched = await enrichQuotes(top);
+  // Ticker-filtered history ends when a window comes back empty; the general feed rotates forever.
+  const has_more = symbolFilter ? merged.length > 0 && page < 36 : page < 400;
 
   const deskCounts = new Map<NewsDesk, { bull: number; bear: number; n: number }>();
   for (const a of enriched) {
@@ -426,7 +549,9 @@ export async function fetchMarketNewsDesk(options?: {
 
   return {
     as_of: new Date().toISOString(),
-    lead: enriched[0] ?? null,
+    page,
+    has_more,
+    lead: page === 0 ? enriched[0] ?? null : null,
     articles: enriched,
     pulse,
     movers,

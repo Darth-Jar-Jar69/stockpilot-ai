@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, FlaskConical } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,13 @@ export function BacktestView() {
   const [symbol, setSymbol] = useState("AAPL");
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Deep link: /backtesting?symbol=NVDA
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sym = new URLSearchParams(window.location.search).get("symbol");
+    if (sym) setSymbol(sym.toUpperCase());
+  }, []);
 
   const run = async () => {
     setLoading(true);

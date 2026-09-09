@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { GitCompare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -15,11 +15,13 @@ export function CompareView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
 
-  const run = async () => {
+  const run = useCallback(async (list?: string) => {
+    const target = (list ?? symbols).trim();
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     try {
-      const res = await fetch(`/api/market/compare?symbols=${encodeURIComponent(symbols)}`);
+      const res = await fetch(`/api/market/compare?symbols=${encodeURIComponent(target)}`);
       if (!res.ok) {
         const err = await res.json();
         setError(err.error);
@@ -31,7 +33,19 @@ export function CompareView() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [symbols]);
+
+  // Deep link: /compare?symbols=NVDA,AMD,INTC — pre-fill and run immediately.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const list = new URLSearchParams(window.location.search).get("symbols");
+    if (list) {
+      const clean = list.toUpperCase().split(",").map((s) => s.trim()).filter(Boolean).join(",");
+      setSymbols(clean);
+      run(clean);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="space-y-6 p-6">
@@ -43,7 +57,7 @@ export function CompareView() {
         </CardHeader>
         <CardContent className="flex gap-2">
           <Input value={symbols} onChange={(e) => setSymbols(e.target.value)} className="bg-secondary/50" />
-          <Button onClick={run} disabled={loading}><GitCompare className="mr-2 h-4 w-4" />{loading ? "Comparing…" : "Compare"}</Button>
+          <Button onClick={() => run()} disabled={loading}><GitCompare className="mr-2 h-4 w-4" />{loading ? "Comparing…" : "Compare"}</Button>
         </CardContent>
       </Card>
       {error && <p className="text-amber-300">{error}</p>}

@@ -1,14 +1,13 @@
 import type { Metadata } from "next";
 
-import { LiveMarketPanel } from "@/components/features/dashboard/live-market-panel";
-import { MarketIntelligencePanel } from "@/components/features/dashboard/market-intelligence-panel";
+import { DashboardOverview } from "@/components/features/dashboard/dashboard-overview";
 import { SymbolSearch } from "@/components/features/analysis/symbol-search";
 
 export const metadata: Metadata = {
   title: "Dashboard",
 };
 
-/** Dashboard — portfolio shell with live market data from FastAPI. */
+/** Dashboard — one-screen summary of every StockPilot surface, each card linking into its full page. */
 export default function DashboardPage() {
   return (
     <div className="space-y-6 p-6">
@@ -16,14 +15,13 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-white">Dashboard</h1>
           <p className="text-sm text-slate-300">
-            Live market data from Yahoo Finance &amp; Finnhub — AI-Powered Market Analysis.
+            Your book, your watchlist, the tape and the scanner — summarised. Jump into any card for the full view.
           </p>
         </div>
         <SymbolSearch />
       </div>
 
-      <MarketIntelligencePanel />
-      <LiveMarketPanel />
+      <DashboardOverview />
     </div>
   );
 }
