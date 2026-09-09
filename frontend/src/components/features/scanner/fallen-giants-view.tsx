@@ -264,6 +264,59 @@ export function FallenGiantsView() {
             </Card>
           ) : (
             <div className="space-y-4">
+              <div className="sticky top-0 z-20 -mx-1 overflow-x-auto rounded-xl border border-border/50 bg-background/95 px-3 py-2 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/90">
+                <div className="flex min-w-[720px] items-center gap-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <span className="w-16 shrink-0">Ticker</span>
+                  <span className="w-40 shrink-0">Company</span>
+                  <span className="w-20 shrink-0 text-right">Price</span>
+                  <span className="w-16 shrink-0 text-right">Decline</span>
+                  <span className="w-14 shrink-0 text-right">FG</span>
+                  <span className="w-16 shrink-0 text-right">Recovery</span>
+                  <span className="min-w-[120px] flex-1">Catalyst</span>
+                </div>
+                <div className="mt-1 max-h-40 space-y-1 overflow-y-auto">
+                  {data.results.map((row) => (
+                    <button
+                      key={`sticky-${row.symbol}`}
+                      type="button"
+                      onClick={() => {
+                        setExpanded(row.symbol);
+                        document
+                          .getElementById(`fg-${row.symbol}`)
+                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                      className="flex min-w-[720px] w-full items-center gap-3 rounded-md px-0.5 py-1 text-left text-xs hover:bg-secondary/60"
+                    >
+                      <span className="w-16 shrink-0 font-mono font-semibold text-primary">
+                        {row.symbol}
+                      </span>
+                      <span className="w-40 shrink-0 truncate text-slate-300">
+                        {row.company_name ?? "—"}
+                      </span>
+                      <span className="w-20 shrink-0 text-right text-white">
+                        {row.current_price != null
+                          ? formatCurrency(row.current_price, "USD")
+                          : "—"}
+                      </span>
+                      <span className="w-16 shrink-0 text-right text-loss">
+                        {row.decline_percent != null
+                          ? formatPercent(-Math.abs(row.decline_percent))
+                          : "—"}
+                      </span>
+                      <span className="w-14 shrink-0 text-right font-mono text-slate-100">
+                        {row.fallen_giants_score?.toFixed(0) ?? "—"}
+                      </span>
+                      <span className="w-16 shrink-0 text-right text-slate-300">
+                        {row.recovery_score?.toFixed(0) ?? "—"}
+                      </span>
+                      <span className="min-w-[120px] flex-1 truncate text-slate-400">
+                        {catalystLabel(row.catalyst_type)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {data.results.map((row) => (
                 <FallenGiantCard
                   key={row.symbol}
@@ -355,7 +408,7 @@ function FallenGiantCard({
     : "—";
 
   return (
-    <Card className="glass border-border/50">
+    <Card id={`fg-${row.symbol}`} className="glass scroll-mt-36 border-border/50">
       <CardHeader className="space-y-4 pb-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -374,9 +427,14 @@ function FallenGiantCard({
               </Badge>
             </CardTitle>
             <CardDescription className="mt-1 text-slate-400">
-              {row.catalyst ?? "Catalyst under review"} · {dateLabel}
+              {row.catalyst ?? "Price dislocation from recent highs"} · {dateLabel}
               {row.days_since_catalyst != null ? ` · ${row.days_since_catalyst}d since trough` : ""}
             </CardDescription>
+            <p className="mt-2 max-w-3xl text-xs leading-relaxed text-slate-500">
+              FG score blends how hard it fell (dislocation), how much it has bounced (recovery),
+              and residual risk. Expand for the full bull/bear narrative — a crash alone is not a
+              buy signal.
+            </p>
           </div>
           <Button variant="ghost" size="sm" onClick={onToggle} className="self-start">
             {expanded ? (
@@ -395,17 +453,23 @@ function FallenGiantCard({
           <Metric label="Market cap" value={formatMarketCap(row.market_cap)} />
           <Metric
             label="Current"
-            value={row.current_price != null ? formatCurrency(row.current_price) : "—"}
+            value={
+              row.current_price != null ? formatCurrency(row.current_price, "USD") : "—"
+            }
           />
           <Metric
             label="Pre-catalyst"
-            value={row.pre_catalyst_price != null ? formatCurrency(row.pre_catalyst_price) : "—"}
+            value={
+              row.pre_catalyst_price != null
+                ? formatCurrency(row.pre_catalyst_price, "USD")
+                : "—"
+            }
           />
           <Metric
             label="Trough"
             value={
               row.lowest_price_after_catalyst != null
-                ? formatCurrency(row.lowest_price_after_catalyst)
+                ? formatCurrency(row.lowest_price_after_catalyst, "USD")
                 : "—"
             }
           />

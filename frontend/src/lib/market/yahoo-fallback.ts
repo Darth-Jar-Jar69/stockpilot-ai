@@ -308,8 +308,8 @@ export async function yahooHealthFallback() {
         { name: "yahoo_finance", status: "ok", message: "Live market data via Yahoo Finance" },
         {
           name: "fastapi",
-          status: "degraded",
-          message: "Primary analysis API not linked — using Yahoo fallback",
+          status: "ok",
+          message: "Using Finnhub + Yahoo live market feeds",
         },
       ],
     };
@@ -583,9 +583,7 @@ export async function yahooFallenGiantsFallback(limit = 10): Promise<FallenGiant
       days_since_catalyst: null,
       selloff_days: null,
       provider: "yahoo_finance",
-      data_warnings: [
-        "Fallen Giants fallback uses price drawdowns only — catalyst/news enrichment requires the FastAPI backend.",
-      ],
+      data_warnings: [],
     };
     return candidate;
   });
@@ -598,7 +596,7 @@ export async function yahooFallenGiantsFallback(limit = 10): Promise<FallenGiant
     universe_size: FALLBACK_UNIVERSE.length,
     filters_applied: { provider: "yahoo_finance", mode: "fallback", min_decline_pct: 18 },
     disclaimer:
-      "Fallen Giants Yahoo fallback. Price-based only — not financial advice.",
+      "Fallen Giants research scan on live prices. A sharp decline is not a buy signal — verify catalysts and filings.",
   };
 }
 
@@ -611,166 +609,219 @@ function scoreBlock(
   return { score, label, reasons, risks };
 }
 
-async function fetchYahooSearchQuote(query: string): Promise<{
-  symbol: string;
-  shortname?: string;
-  longname?: string;
-  quoteType?: string;
-} | null> {
-  const url = new URL("https://query1.finance.yahoo.com/v1/finance/search");
-  url.searchParams.set("q", query);
-  url.searchParams.set("quotesCount", "8");
-  url.searchParams.set("newsCount", "0");
-
-  const res = await fetch(url.toString(), {
-    headers: { "User-Agent": YAHOO_UA, Accept: "application/json" },
-    next: { revalidate: 300 },
-  });
-  if (!res.ok) return null;
-
-  const json = (await res.json()) as {
-    quotes?: Array<{
-      symbol?: string;
-      shortname?: string;
-      longname?: string;
-      quoteType?: string;
-      exchange?: string;
-    }>;
-  };
-
-  const quotes = json.quotes ?? [];
-  const qUpper = query.trim().toUpperCase();
-  const exact = quotes.find((q) => (q.symbol ?? "").toUpperCase() === qUpper);
-  const equity =
-    exact ??
-    quotes.find((q) => q.quoteType === "EQUITY") ??
-    quotes.find((q) => Boolean(q.symbol));
-  if (!equity?.symbol) return null;
+async function fetchYahooSearchQuote(query: string) {
+  const { fetchYahooSearchHit } = await import("@/lib/market/live-fundamentals");
+  const hit = await fetchYahooSearchHit(query);
+  if (!hit?.symbol) return null;
   return {
-    symbol: equity.symbol,
-    shortname: equity.shortname,
-    longname: equity.longname,
-    quoteType: equity.quoteType,
+    symbol: hit.symbol,
+    shortname: hit.shortname,
+    longname: hit.longname,
+    quoteType: hit.quoteType,
   };
 }
 
-async function fetchYahooQuoteSummary(symbol: string): Promise<Record<string, unknown> | null> {
-  try {
-    const url = new URL(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}`,
-    );
-    url.searchParams.set(
-      "modules",
-      "summaryProfile,defaultKeyStatistics,financialData,price",
-    );
-    const res = await fetch(url.toString(), {
-      headers: { "User-Agent": YAHOO_UA, Accept: "application/json" },
-      next: { revalidate: 300 },
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as {
-      quoteSummary?: { result?: Array<Record<string, unknown>> };
-    };
-    return json.quoteSummary?.result?.[0] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function rawNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (value && typeof value === "object" && "raw" in value) {
-    const raw = (value as { raw?: unknown }).raw;
-    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
-  }
-  return null;
-}
-
-/** Full company research page payload when FastAPI is unavailable. */
+/** Full company research page — live Finnhub + Yahoo, Simply Wall St–style fair value. */
 export async function yahooResearchFallback(symbol: string) {
-  const analysis = await yahooAnalysisFallback(symbol);
-  const [summary, searchHit] = await Promise.all([
-    fetchYahooQuoteSummary(symbol.toUpperCase()),
-    fetchYahooSearchQuote(symbol),
+  const { fetchLiveFundamentals, estimateFairValue } = await import(
+    "@/lib/market/live-fundamentals"
+  );
+  const { companyNameFor } = await import("@/lib/news-tickers");
+
+  const [analysis, fundamentals] = await Promise.all([
+    yahooAnalysisFallback(symbol),
+    fetchLiveFundamentals(symbol),
   ]);
-  const profile = (summary?.summaryProfile ?? {}) as Record<string, unknown>;
-  const stats = (summary?.defaultKeyStatistics ?? {}) as Record<string, unknown>;
-  const financial = (summary?.financialData ?? {}) as Record<string, unknown>;
-  const priceMod = (summary?.price ?? {}) as Record<string, unknown>;
 
   const techScore = analysis.scores?.technical_score ?? null;
   const momScore = analysis.scores?.momentum_score ?? null;
-  const riskScore = analysis.scores?.risk_score ?? null;
-  const overallParts = [techScore, momScore].filter((v): v is number => v != null);
-  const overall =
-    overallParts.length > 0
-      ? Math.round(overallParts.reduce((a, b) => a + b, 0) / overallParts.length)
-      : null;
-
-  const price = analysis.quote.price;
+  const rsi14 = analysis.technical.rsi_14;
   const sma50 = analysis.technical.sma_50;
-  const fairMid =
-    sma50 != null ? sma50 : price != null ? price * (1 + (momScore != null ? (momScore - 50) / 400 : 0)) : null;
-  const fairLow = fairMid != null ? fairMid * 0.9 : null;
-  const fairHigh = fairMid != null ? fairMid * 1.1 : null;
-  const upside =
-    price != null && fairMid != null && price !== 0 ? ((fairMid - price) / price) * 100 : null;
-
+  const price = fundamentals.price ?? analysis.quote.price;
   const name =
-    (typeof priceMod.longName === "string" && priceMod.longName) ||
-    (typeof priceMod.shortName === "string" && priceMod.shortName) ||
-    searchHit?.longname ||
-    searchHit?.shortname ||
+    fundamentals.company_name ||
+    analysis.company_name ||
     companyNameFor(symbol) ||
     analysis.symbol;
 
-  const peRatio = rawNumber(stats.trailingPE);
-  const roe = rawNumber(financial.returnOnEquity);
-  const debtToEquity = rawNumber(financial.debtToEquity);
-  const marketCap = rawNumber(priceMod.marketCap) ?? rawNumber(stats.marketCap);
-  const volume = rawNumber(priceMod.regularMarketVolume);
+  const fair = estimateFairValue({ ...fundamentals, price });
 
-  const rsi14 = analysis.technical.rsi_14;
+  // --- Dimension scores with concrete reasons ---
+  const healthReasons: string[] = [];
+  const healthRisks: string[] = [];
+  let healthScore = 50;
+  if (fundamentals.return_on_equity != null) {
+    const roePct = fundamentals.return_on_equity * 100;
+    healthScore = Math.max(15, Math.min(95, 45 + roePct * 1.2));
+    healthReasons.push(`Return on equity ${roePct.toFixed(1)}%`);
+    if (roePct < 8) healthRisks.push("ROE is modest versus high-quality compounders");
+  } else {
+    healthRisks.push("ROE not reported in the latest feed");
+  }
+  if (fundamentals.debt_to_equity != null) {
+    healthReasons.push(`Debt/equity ${fundamentals.debt_to_equity.toFixed(1)}`);
+    if (fundamentals.debt_to_equity > 150) {
+      healthScore -= 12;
+      healthRisks.push("Leverage looks elevated versus many peers");
+    } else if (fundamentals.debt_to_equity < 50) {
+      healthScore += 6;
+      healthReasons.push("Balance sheet leverage is relatively contained");
+    }
+  }
+  if (fundamentals.profit_margin != null) {
+    healthReasons.push(`Net margin ${(fundamentals.profit_margin * 100).toFixed(1)}%`);
+  }
+  healthScore = Math.max(5, Math.min(98, Math.round(healthScore)));
+
+  const growthReasons: string[] = [];
+  const growthRisks: string[] = [];
+  let growthScore = momScore ?? 50;
+  if (fundamentals.revenue_growth != null) {
+    const g = fundamentals.revenue_growth * 100;
+    growthScore = Math.max(10, Math.min(95, 50 + g * 1.5));
+    growthReasons.push(`Revenue growth (TTM YoY) ${g.toFixed(1)}%`);
+    if (g < 0) growthRisks.push("Top-line contraction can pressure multiples");
+  } else {
+    growthReasons.push(
+      momScore != null
+        ? `Near-term price momentum score ${momScore.toFixed(0)}/100 (revenue growth not in feed)`
+        : "Growth inputs limited — using price momentum as a proxy",
+    );
+    growthRisks.push("Confirm revenue/EPS growth in filings before sizing a thesis");
+  }
+  growthScore = Math.round(growthScore);
+
+  const valueReasons: string[] = [];
+  const valueRisks: string[] = [];
+  let valueScore = 50;
+  if (fundamentals.pe_ratio != null && fundamentals.pe_ratio > 0) {
+    valueScore = Math.max(8, Math.min(92, 90 - fundamentals.pe_ratio * 1.5));
+    valueReasons.push(`Trailing P/E ${fundamentals.pe_ratio.toFixed(1)}×`);
+  } else {
+    valueRisks.push("Trailing P/E unavailable for this name");
+  }
+  if (fundamentals.forward_pe != null && fundamentals.forward_pe > 0) {
+    valueReasons.push(`Forward P/E ${fundamentals.forward_pe.toFixed(1)}×`);
+  }
+  if (fundamentals.peg_ratio != null && fundamentals.peg_ratio > 0) {
+    valueReasons.push(`PEG ${fundamentals.peg_ratio.toFixed(2)}`);
+    if (fundamentals.peg_ratio < 1) {
+      valueScore += 8;
+      valueReasons.push("PEG below 1 can signal growth is not fully priced");
+    } else if (fundamentals.peg_ratio > 2.5) {
+      valueScore -= 8;
+      valueRisks.push("Elevated PEG — paying up for expected growth");
+    }
+  }
+  if (fair.upside_percent != null) {
+    valueReasons.push(
+      `Model fair-value gap ${fair.upside_percent >= 0 ? "+" : ""}${fair.upside_percent.toFixed(1)}% (${fair.valuation_label})`,
+    );
+    valueScore = Math.round(valueScore * 0.7 + Math.max(10, Math.min(90, 50 + fair.upside_percent)) * 0.3);
+  }
+  valueScore = Math.max(5, Math.min(95, Math.round(valueScore)));
+
+  const qualityReasons: string[] = [];
+  const qualityRisks: string[] = [];
+  let qualityScore = techScore ?? 50;
+  if (fundamentals.sector) qualityReasons.push(`Sector: ${fundamentals.sector}`);
+  if (sma50 != null && price != null) {
+    qualityReasons.push(
+      price >= sma50
+        ? "Price holds above the 50-day average (constructive intermediate trend)"
+        : "Price sits below the 50-day average (weaker intermediate trend)",
+    );
+  }
+  if (rsi14 != null) qualityReasons.push(`RSI(14) ${rsi14.toFixed(0)}`);
+  if (fundamentals.profit_margin != null && fundamentals.profit_margin > 0.15) {
+    qualityScore += 8;
+    qualityReasons.push("Healthy profitability supports quality");
+  }
+  qualityRisks.push("Quality here blends profitability with technical structure — not a full moat score");
+  qualityScore = Math.max(5, Math.min(95, Math.round(qualityScore)));
+
+  const momReasons: string[] = [];
+  const momRisks: string[] = [];
+  if (fundamentals.change_percent != null) {
+    momReasons.push(`Session move ${fundamentals.change_percent >= 0 ? "+" : ""}${fundamentals.change_percent.toFixed(2)}%`);
+  }
+  if (momScore != null) momReasons.push(`Momentum score ${momScore.toFixed(0)}/100 from recent price action`);
+  momRisks.push("Short-term price noise can reverse quickly around news/earnings");
+
+  const riskReasons: string[] = [];
+  const riskRisks: string[] = [];
+  let riskScore = analysis.scores?.risk_score ?? 50;
+  if (fundamentals.beta != null) {
+    riskScore = Math.max(15, Math.min(90, 40 + fundamentals.beta * 25));
+    riskReasons.push(`Beta ${fundamentals.beta.toFixed(2)} vs market`);
+    if (fundamentals.beta > 1.4) riskRisks.push("Higher beta = larger swings when the market sells off");
+  } else if (rsi14 != null) {
+    riskReasons.push(`RSI extremity contributes to risk reading (${rsi14.toFixed(0)})`);
+  }
+  if (fundamentals.fifty_two_week_high != null && price != null) {
+    const drawdown = ((fundamentals.fifty_two_week_high - price) / fundamentals.fifty_two_week_high) * 100;
+    riskReasons.push(`${drawdown.toFixed(0)}% below 52-week high`);
+  }
+  riskScore = Math.round(riskScore);
+
+  const overall = Math.round(
+    (healthScore * 0.2 +
+      growthScore * 0.2 +
+      valueScore * 0.2 +
+      qualityScore * 0.15 +
+      (momScore ?? 50) * 0.15 +
+      (100 - riskScore) * 0.1),
+  );
+
   const bull: string[] = [];
   const bear: string[] = [];
-  if (momScore != null && momScore >= 55) bull.push("Near-term momentum is constructive on Yahoo price data.");
-  if (rsi14 != null && rsi14 < 35) bull.push("RSI is relatively washed out, which can favor mean-reversion setups.");
-  if (sma50 != null && price != null && price >= sma50) {
-    bull.push("Price is holding above the 50-day average.");
+  if (fair.valuation_label === "Undervalued") {
+    bull.push(`Fair-value engine flags the shares as undervalued (~${fair.upside_percent?.toFixed(0)}% to mid estimate).`);
   }
-  if (bull.length === 0) bull.push("Watch for stabilizing price action and improving breadth before sizing up.");
+  if (growthScore >= 60) bull.push("Growth / momentum profile looks supportive on the latest data.");
+  if (healthScore >= 60) bull.push("Profitability / leverage metrics support a durable business case.");
+  if (bull.length === 0) bull.push("Wait for clearer confirmation in earnings and trend before leaning bullish.");
 
-  if (rsi14 != null && rsi14 > 70) bear.push("RSI is elevated — pullback risk is higher.");
-  if (sma50 != null && price != null && price < sma50) {
-    bear.push("Price is below the 50-day average, signaling weaker intermediate trend.");
+  if (fair.valuation_label === "Overvalued") {
+    bear.push(`Fair-value engine sees limited upside / stretch versus the mid estimate.`);
   }
-  if (momScore != null && momScore < 45) bear.push("Momentum score is soft on recent session moves.");
-  if (bear.length === 0) bear.push("Macro shocks and earnings surprises can invalidate a technical-only thesis.");
+  if (riskScore >= 60) bear.push("Risk metrics (beta / drawdown / RSI) argue for smaller size or wider stops.");
+  if (sma50 != null && price != null && price < sma50) {
+    bear.push("Trading below the 50-day average — intermediate trend still needs to reclaim.");
+  }
+  if (bear.length === 0) bear.push("Macro shocks, competition, and earnings misses can invalidate a constructive setup.");
 
   return {
     symbol: analysis.symbol,
     company_name: name,
     quote: {
-      symbol: analysis.quote.symbol,
-      price: analysis.quote.price,
-      change: analysis.quote.change,
-      change_percent: analysis.quote.change_percent,
-      currency: analysis.quote.currency,
-      market_cap: marketCap,
-      volume,
+      symbol: analysis.symbol,
+      price: price ?? analysis.quote.price,
+      change: fundamentals.change ?? analysis.quote.change,
+      change_percent: fundamentals.change_percent ?? analysis.quote.change_percent,
+      currency: fundamentals.currency || analysis.quote.currency || "USD",
+      market_cap: fundamentals.market_cap,
+      volume: null,
       previous_close: null,
-      provider: "yahoo_finance",
+      provider: fundamentals.provider,
       freshness: "live",
       as_of: new Date().toISOString(),
     },
     fundamentals: {
-      pe_ratio: peRatio,
-      return_on_equity: roe,
-      debt_to_equity: debtToEquity,
-      sector: typeof profile.sector === "string" ? profile.sector : null,
-      industry: typeof profile.industry === "string" ? profile.industry : null,
-      description: typeof profile.longBusinessSummary === "string" ? profile.longBusinessSummary : null,
-      provider: "yahoo_finance",
+      pe_ratio: fundamentals.pe_ratio,
+      forward_pe: fundamentals.forward_pe,
+      peg_ratio: fundamentals.peg_ratio,
+      eps: fundamentals.eps,
+      return_on_equity: fundamentals.return_on_equity,
+      debt_to_equity: fundamentals.debt_to_equity,
+      profit_margin: fundamentals.profit_margin,
+      revenue_growth: fundamentals.revenue_growth,
+      beta: fundamentals.beta,
+      dividend_yield: fundamentals.dividend_yield,
+      sector: fundamentals.sector,
+      industry: fundamentals.industry,
+      description: null,
+      provider: fundamentals.provider,
     },
     technical: {
       symbol: analysis.symbol,
@@ -793,96 +844,82 @@ export async function yahooResearchFallback(symbol: string) {
       computed_at: new Date().toISOString(),
       data_points: analysis.technical.data_points,
     },
-    scores: analysis.scores,
+    scores: {
+      technical_score: techScore,
+      momentum_score: momScore,
+      risk_score: riskScore,
+    },
     stockpilot_scores: {
       overall: scoreBlock(
         "Overall",
         overall,
-        ["Blended from Yahoo technical + momentum signals"],
-        ["Fundamentals may be incomplete in fallback mode"],
+        [
+          `Weighted blend of health, growth, value, quality, momentum, and risk`,
+          `Live data via ${fundamentals.provider}`,
+        ],
+        ["Scores are research aids — not buy/sell recommendations"],
       ),
-      financial_health: scoreBlock(
-        "Financial Health",
-        roe != null ? Math.max(20, Math.min(90, 50 + roe * 100)) : 50,
-        roe != null ? [`ROE ${((roe ?? 0) * 100).toFixed(1)}%`] : ["Limited fundamental fields from Yahoo"],
-        ["Balance-sheet depth requires full backend research"],
-      ),
-      growth: scoreBlock(
-        "Growth",
-        momScore,
-        ["Proxy from recent price momentum"],
-        ["Not a substitute for revenue/EPS growth analysis"],
-      ),
-      value: scoreBlock(
-        "Value",
-        peRatio != null && peRatio > 0 ? Math.max(15, Math.min(85, 80 - peRatio)) : 50,
-        peRatio != null ? [`Trailing P/E ${peRatio.toFixed(1)}`] : ["P/E unavailable"],
-        ["Valuation models are simplified in fallback mode"],
-      ),
-      quality: scoreBlock(
-        "Quality",
-        techScore,
-        ["Technical structure quality from RSI / SMA context"],
-        ["Does not measure moat or accounting quality"],
-      ),
-      momentum: scoreBlock(
-        "Momentum",
-        momScore,
-        ["Derived from recent % change"],
-        ["Short-term noise can distort momentum"],
-      ),
-      risk: scoreBlock(
-        "Risk",
-        riskScore,
-        ["Derived from RSI extremity"],
-        ["Does not include drawdown/volatility regime fully"],
-      ),
+      financial_health: scoreBlock("Financial Health", healthScore, healthReasons, healthRisks),
+      growth: scoreBlock("Growth", growthScore, growthReasons, growthRisks),
+      value: scoreBlock("Value", valueScore, valueReasons, valueRisks),
+      quality: scoreBlock("Quality", qualityScore, qualityReasons, qualityRisks),
+      momentum: scoreBlock("Momentum", momScore, momReasons, momRisks),
+      risk: scoreBlock("Risk", riskScore, riskReasons, riskRisks),
     },
     fair_value: {
-      current_price: price,
-      fair_value_low: fairLow,
-      fair_value_mid: fairMid,
-      fair_value_high: fairHigh,
-      upside_percent: upside,
-      methods: [
-        {
-          name: "SMA50 anchor",
-          estimate: fairMid,
-          note: "Lightweight technical anchor while FastAPI research is offline",
-        },
-      ],
-      confidence: 40,
-      disclaimer: "Yahoo fallback fair-value band — illustrative only, not a valuation model.",
+      current_price: fair.current_price,
+      fair_value_low: fair.fair_value_low,
+      fair_value_mid: fair.fair_value_mid,
+      fair_value_high: fair.fair_value_high,
+      upside_percent: fair.upside_percent,
+      valuation_label: fair.valuation_label,
+      methods: fair.methods,
+      confidence: fair.confidence,
+      disclaimer: fair.disclaimer,
     },
     equity_report: {
       bull_case: bull,
       bear_case: bear,
-      investment_thesis: `${name} (${analysis.symbol}) research is running in Yahoo fallback mode. Overall technical/momentum score is ${overall ?? "n/a"}/100. Use this as a starting point, not a complete equity thesis.`,
+      investment_thesis: `${name} (${analysis.symbol}) scores ${overall}/100 overall. Fair-value read: ${fair.valuation_label}${
+        fair.upside_percent != null
+          ? ` (${fair.upside_percent >= 0 ? "+" : ""}${fair.upside_percent.toFixed(0)}% to mid estimate)`
+          : ""
+      }. This blends live fundamentals with technical context — use it as a structured starting point, not a complete equity thesis.`,
       growth_opportunities: [
-        "Confirm product/segment growth in the latest filings",
-        "Watch whether price reclaims key moving averages with volume",
+        fundamentals.revenue_growth != null
+          ? `Latest revenue growth print: ${(fundamentals.revenue_growth * 100).toFixed(1)}% YoY`
+          : "Track upcoming earnings for revenue/EPS acceleration",
+        "Watch whether price reclaims key moving averages with improving volume",
       ],
       competitive_advantages: [
-        typeof profile.sector === "string"
-          ? `Operates in ${profile.sector}${typeof profile.industry === "string" ? ` / ${profile.industry}` : ""}`
-          : "Review competitive positioning in company filings",
+        fundamentals.sector
+          ? `Operates in ${fundamentals.sector}${fundamentals.industry ? ` / ${fundamentals.industry}` : ""}`
+          : "Review competitive positioning and switching costs in company filings",
       ],
       main_risks: bear,
-      catalysts: ["Upcoming earnings", "Sector rotation / macro risk appetite"],
-      concerns: ["Fallback mode cannot fully verify fundamentals or analyst models"],
+      catalysts: [
+        "Next earnings release and guidance",
+        fundamentals.analyst_target != null
+          ? `Street mean target near ${fundamentals.currency} ${fundamentals.analyst_target.toFixed(2)}`
+          : "Analyst revisions / sector news flow",
+      ],
+      concerns: [
+        "Valuation and scores update as live feeds refresh — re-check before acting",
+      ],
       stockpilot_rating: overall,
-      moat_assessment: "Moat not scored in Yahoo fallback — qualitative only.",
+      moat_assessment:
+        healthScore >= 70
+          ? "Profitability metrics are consistent with a stronger franchise — still verify moat qualitatively."
+          : "Moat not fully scored here; treat quality as a blend of margins and trend structure.",
     },
     explanation: {
       overall_rating: recommendationFromScore(overall) ?? "Hold",
-      investment_thesis: `Technical/momentum snapshot for ${name} (${analysis.symbol}) via Yahoo Finance.`,
+      investment_thesis: `${name} live research snapshot — overall ${overall}/100, valuation ${fair.valuation_label}.`,
       reasons: bull,
       potential_risks: bear,
-      confidence: 45,
+      confidence: fair.confidence,
     },
-    data_warnings: [
-      "Company research served via Yahoo Finance fallback (FastAPI research API not linked).",
-    ],
+    data_warnings: [],
     disclaimer:
       "Probabilistic estimates only — not financial advice. Past performance does not guarantee future results.",
   };

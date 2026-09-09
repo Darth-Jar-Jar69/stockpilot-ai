@@ -6,11 +6,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** Format currency for display (GBP default; locale-aware in later milestones). */
-export function formatCurrency(value: number, currency = "GBP"): string {
-  return new Intl.NumberFormat("en-GB", {
+/** Format currency for display. Defaults to USD (most equities on StockPilot). */
+export function formatCurrency(value: number, currency = "USD"): string {
+  const code = currency || "USD";
+  const locale = code === "GBP" ? "en-GB" : code === "EUR" ? "en-IE" : "en-US";
+  return new Intl.NumberFormat(locale, {
     style: "currency",
-    currency,
+    currency: code,
     minimumFractionDigits: 2,
   }).format(value);
 }
