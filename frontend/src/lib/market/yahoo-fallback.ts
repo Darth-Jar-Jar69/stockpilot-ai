@@ -116,6 +116,64 @@ async function fetchYahooChart(symbol: string, range = "6mo"): Promise<YahooChar
   return result;
 }
 
+/**
+ * Yahoo's chart `meta.previousClose` is never populated and `chartPreviousClose`
+ * is the close *before the requested range starts* (for range=1y that is a year ago).
+ * Using it produced fake -30% "session" moves. Derive the real prior close from
+ * the bar series instead.
+ */
+export function previousCloseFrom(chart: YahooChartResult): number | null {
+  const closes =
+    chart.indicators?.quote?.[0]?.close?.filter((v): v is number => typeof v === "number") ?? [];
+  const price = chart.meta?.regularMarketPrice ?? closes.at(-1) ?? null;
+  if (price == null) return null;
+
+  if (closes.length >= 2) {
+    const last = closes.at(-1)!;
+    // Last bar is today's (possibly live) session â†’ prior bar is the previous close.
+    if (Math.abs(last - price) / price < 0.03) return closes.at(-2)!;
+    // Last bar is already yesterday (pre-market / meta ahead of bars).
+    return last;
+  }
+  if (closes.length === 1) {
+    const last = closes[0]!;
+    if (Math.abs(last - price) / price >= 0.03) return last;
+    // Only a single (today) bar: chartPreviousClose is genuinely the prior close here.
+    return chart.meta?.chartPreviousClose ?? null;
+  }
+  return chart.meta?.chartPreviousClose ?? null;
+}
+
+export function periodReturns(closes: number[]) {
+  const last = closes.at(-1);
+  const ret = (barsBack: number): number | null => {
+    if (last == null || closes.length <= barsBack) return null;
+    const base = closes[closes.length - 1 - barsBack];
+    if (base == null || base === 0) return null;
+    return ((last - base) / base) * 100;
+  };
+  return {
+    one_week: ret(5),
+    one_month: ret(21),
+    three_month: ret(63),
+    six_month: ret(126),
+    one_year: closes.length >= 240 ? ret(closes.length - 1) : null,
+  };
+}
+
+export function annualizedVolatility(closes: number[], lookback = 63): number | null {
+  const series = closes.slice(-(lookback + 1));
+  if (series.length < 20) return null;
+  const rets: number[] = [];
+  for (let i = 1; i < series.length; i++) {
+    const prev = series[i - 1]!;
+    if (prev > 0) rets.push(Math.log(series[i]! / prev));
+  }
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, rets.length - 1);
+  return Math.sqrt(variance) * Math.sqrt(252);
+}
+
 function recommendationFromScore(score: number | null): string | null {
   if (score == null) return null;
   if (score >= 80) return "Strong Buy";
@@ -131,7 +189,7 @@ function scanResultFromChart(symbol: string, chart: YahooChartResult): ScanResul
   const volumes =
     chart.indicators?.quote?.[0]?.volume?.filter((v): v is number => typeof v === "number") ?? [];
   const price = chart.meta?.regularMarketPrice ?? closes.at(-1) ?? null;
-  const previous = chart.meta?.previousClose ?? chart.meta?.chartPreviousClose ?? null;
+  const previous = previousCloseFrom(chart);
   const change = price != null && previous != null ? price - previous : null;
   const changePercent =
     price != null && previous != null && previous !== 0 ? (change! / previous) * 100 : null;
@@ -139,15 +197,11 @@ function scanResultFromChart(symbol: string, chart: YahooChartResult): ScanResul
   const rsi14 = rsi(closes, 14);
   const sma50 = sma(closes, 50);
   const macdHist = macdHistogram(closes);
+  const returns = periodReturns(closes);
 
-  const technicalScore =
-    rsi14 == null
-      ? null
-      : Math.max(0, Math.min(100, rsi14 > 70 ? 35 : rsi14 < 30 ? 75 : 50 + (50 - rsi14) * 0.4));
-  const momentumScore =
-    changePercent == null ? null : Math.max(0, Math.min(100, 50 + changePercent * 4));
-  const riskScore =
-    rsi14 == null ? null : Math.max(0, Math.min(100, Math.abs(rsi14 - 50) * 1.5 + 25));
+  const technicalScore = technicalScoreFrom({ rsi14, price, sma50, sma200: sma(closes, 200), macdHist });
+  const momentumScore = momentumScoreFrom(returns, changePercent);
+  const riskScore = riskScoreFromPrices(closes, price);
 
   const parts = [technicalScore, momentumScore].filter((v): v is number => v != null);
   const stockpilotScore =
@@ -193,7 +247,7 @@ export async function yahooQuoteFallback(symbol: string) {
   const price = chart.meta?.regularMarketPrice;
   if (price == null) throw new Error("No price from Yahoo Finance.");
 
-  const previous = chart.meta?.previousClose ?? chart.meta?.chartPreviousClose ?? null;
+  const previous = previousCloseFrom(chart);
   const change = previous != null ? price - previous : null;
   const changePercent = previous != null && previous !== 0 ? (change! / previous) * 100 : null;
 
@@ -202,10 +256,88 @@ export async function yahooQuoteFallback(symbol: string) {
     price,
     change,
     change_percent: changePercent,
+    previous_close: previous,
     currency: chart.meta?.currency ?? "USD",
     provider: "yahoo_finance",
     freshness: "live",
   };
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+/** Piecewise-linear interpolation over sorted [x, y] anchor points, clamped at the ends. */
+export function interp(x: number, points: [number, number][]): number {
+  if (x <= points[0]![0]) return points[0]![1];
+  for (let i = 1; i < points.length; i++) {
+    const [x1, y1] = points[i]!;
+    if (x <= x1) {
+      const [x0, y0] = points[i - 1]!;
+      const t = (x - x0) / (x1 - x0);
+      return y0 + t * (y1 - y0);
+    }
+  }
+  return points[points.length - 1]![1];
+}
+
+function technicalScoreFrom(input: {
+  rsi14: number | null;
+  price: number | null;
+  sma50: number | null;
+  sma200: number | null;
+  macdHist: number | null;
+}): number | null {
+  const parts: { v: number; w: number }[] = [];
+  if (input.rsi14 != null) {
+    parts.push({ v: interp(input.rsi14, [[20, 40], [30, 50], [50, 65], [65, 60], [75, 40], [85, 25]]), w: 1 });
+  }
+  if (input.price != null && input.sma50 != null) {
+    const gap = ((input.price - input.sma50) / input.sma50) * 100;
+    parts.push({ v: interp(gap, [[-20, 15], [-8, 35], [0, 50], [5, 70], [15, 80]]), w: 1 });
+  }
+  if (input.price != null && input.sma200 != null) {
+    const gap = ((input.price - input.sma200) / input.sma200) * 100;
+    parts.push({ v: interp(gap, [[-30, 10], [-10, 35], [0, 55], [10, 72], [30, 85]]), w: 1.2 });
+  }
+  if (input.macdHist != null && input.price != null) {
+    const rel = (input.macdHist / input.price) * 100;
+    parts.push({ v: interp(rel, [[-3, 25], [0, 50], [3, 75]]), w: 0.6 });
+  }
+  if (parts.length === 0) return null;
+  const wsum = parts.reduce((a, p) => a + p.w, 0);
+  return clamp(Math.round(parts.reduce((a, p) => a + p.v * p.w, 0) / wsum), 0, 100);
+}
+
+function momentumScoreFrom(
+  r: ReturnType<typeof periodReturns>,
+  changePercent: number | null,
+): number | null {
+  const parts: { v: number; w: number }[] = [];
+  if (r.one_month != null) parts.push({ v: interp(r.one_month, [[-15, 15], [-5, 35], [0, 50], [5, 65], [15, 85]]), w: 0.8 });
+  if (r.three_month != null) parts.push({ v: interp(r.three_month, [[-25, 10], [-10, 30], [0, 50], [10, 70], [25, 90]]), w: 1.2 });
+  if (r.six_month != null) parts.push({ v: interp(r.six_month, [[-35, 10], [-15, 30], [0, 50], [15, 70], [40, 90]]), w: 1 });
+  if (r.one_year != null) parts.push({ v: interp(r.one_year, [[-45, 10], [-15, 30], [0, 50], [20, 70], [60, 90]]), w: 0.8 });
+  if (parts.length === 0 && changePercent != null) {
+    parts.push({ v: interp(changePercent, [[-8, 15], [-2, 40], [0, 50], [2, 60], [8, 85]]), w: 1 });
+  }
+  if (parts.length === 0) return null;
+  const wsum = parts.reduce((a, p) => a + p.w, 0);
+  return clamp(Math.round(parts.reduce((a, p) => a + p.v * p.w, 0) / wsum), 0, 100);
+}
+
+function riskScoreFromPrices(closes: number[], price: number | null): number | null {
+  const parts: { v: number; w: number }[] = [];
+  const vol = annualizedVolatility(closes);
+  if (vol != null) parts.push({ v: interp(vol, [[0.12, 15], [0.2, 30], [0.3, 50], [0.45, 70], [0.7, 88], [1, 97]]), w: 1.2 });
+  if (price != null && closes.length >= 60) {
+    const peak = Math.max(...closes);
+    const dd = peak > 0 ? ((peak - price) / peak) * 100 : 0;
+    parts.push({ v: interp(dd, [[0, 20], [10, 35], [25, 55], [40, 72], [60, 90]]), w: 1 });
+  }
+  if (parts.length === 0) return null;
+  const wsum = parts.reduce((a, p) => a + p.w, 0);
+  return clamp(Math.round(parts.reduce((a, p) => a + p.v * p.w, 0) / wsum), 0, 100);
 }
 
 export async function yahooAnalysisFallback(symbol: string) {
@@ -215,29 +347,42 @@ export async function yahooAnalysisFallback(symbol: string) {
   ]);
   const closes =
     chart.indicators?.quote?.[0]?.close?.filter((v): v is number => typeof v === "number") ?? [];
+  const highs =
+    chart.indicators?.quote?.[0]?.high?.filter((v): v is number => typeof v === "number") ?? [];
+  const lows =
+    chart.indicators?.quote?.[0]?.low?.filter((v): v is number => typeof v === "number") ?? [];
+  const volumes =
+    chart.indicators?.quote?.[0]?.volume?.filter((v): v is number => typeof v === "number") ?? [];
   const price = chart.meta?.regularMarketPrice ?? closes.at(-1);
   if (price == null) throw new Error("No price from Yahoo Finance.");
 
-  const previous = chart.meta?.previousClose ?? chart.meta?.chartPreviousClose ?? null;
+  const previous = previousCloseFrom(chart);
   const change = previous != null ? price - previous : null;
   const changePercent = previous != null && previous !== 0 ? (change! / previous) * 100 : null;
 
   const rsi14 = rsi(closes, 14);
+  const sma20 = sma(closes, 20);
   const sma50 = sma(closes, 50);
+  const sma200 = sma(closes, 200);
   const macdHist = macdHistogram(closes);
+  const returns = periodReturns(closes);
+  const volatility = annualizedVolatility(closes);
 
-  const technicalScore =
-    rsi14 == null
-      ? null
-      : Math.max(0, Math.min(100, rsi14 > 70 ? 35 : rsi14 < 30 ? 75 : 50 + (50 - rsi14) * 0.4));
-  const momentumScore =
-    changePercent == null ? null : Math.max(0, Math.min(100, 50 + changePercent * 4));
-  const riskScore =
-    rsi14 == null ? null : Math.max(0, Math.min(100, Math.abs(rsi14 - 50) * 1.5 + 25));
+  const technicalScore = technicalScoreFrom({ rsi14, price, sma50, sma200, macdHist });
+  const momentumScore = momentumScoreFrom(returns, changePercent);
+  const riskScore = riskScoreFromPrices(closes, price);
 
   const resolvedSymbol = chart.meta?.symbol ?? searchHit?.symbol ?? symbol.toUpperCase();
   const companyName =
     searchHit?.longname || searchHit?.shortname || companyNameFor(resolvedSymbol);
+
+  // 52-week range from the actual 1y bars (meta.fiftyTwoWeek* is often stale/wrong).
+  const yearHigh = highs.length ? Math.max(...highs) : closes.length ? Math.max(...closes) : null;
+  const yearLow = lows.length ? Math.min(...lows) : closes.length ? Math.min(...closes) : null;
+  const avgVolume30 =
+    volumes.length >= 5
+      ? volumes.slice(-30).reduce((a, b) => a + b, 0) / Math.min(30, volumes.length)
+      : null;
 
   return {
     symbol: resolvedSymbol,
@@ -247,6 +392,13 @@ export async function yahooAnalysisFallback(symbol: string) {
       price,
       change,
       change_percent: changePercent,
+      previous_close: previous,
+      day_high: highs.at(-1) ?? null,
+      day_low: lows.at(-1) ?? null,
+      volume: volumes.at(-1) ?? null,
+      avg_volume_30d: avgVolume30,
+      fifty_two_week_high: yearHigh,
+      fifty_two_week_low: yearLow,
       currency: chart.meta?.currency ?? "USD",
       provider: "yahoo_finance",
       freshness: "live",
@@ -254,7 +406,11 @@ export async function yahooAnalysisFallback(symbol: string) {
     technical: {
       rsi_14: rsi14,
       macd_histogram: macdHist,
+      sma_20: sma20,
       sma_50: sma50,
+      sma_200: sma200,
+      volatility_annualized: volatility,
+      returns,
       data_points: closes.length,
     },
     scores: {
@@ -392,7 +548,7 @@ export async function yahooScannerFallback(limit = 30): Promise<ScannerResponse>
     universe_size: FALLBACK_UNIVERSE.length,
     filters_applied: { provider: "yahoo_finance", mode: "fallback" },
     disclaimer:
-      "Yahoo Finance fallback scan. Probabilistic estimates only — not financial advice.",
+      "Yahoo Finance fallback scan. Probabilistic estimates only â€” not financial advice.",
   };
 }
 
@@ -437,7 +593,7 @@ export async function yahooScreenerFallback(
       mode: "fallback",
     },
     disclaimer:
-      "Yahoo Finance fallback screener. Probabilistic estimates only — not financial advice.",
+      "Yahoo Finance fallback screener. Probabilistic estimates only â€” not financial advice.",
   };
 }
 
@@ -473,7 +629,7 @@ export async function yahooCompareFallback(symbolsCsv: string) {
   metrics.sort((a, b) => (b.overall_score ?? 0) - (a.overall_score ?? 0));
   const leader = metrics[0];
   const ai_conclusion = leader
-    ? `${leader.symbol} leads this Yahoo fallback comparison with score ${leader.overall_score ?? "—"}/100. Estimates only — not financial advice.`
+    ? `${leader.symbol} leads this Yahoo fallback comparison with score ${leader.overall_score ?? "â€”"}/100. Estimates only â€” not financial advice.`
     : "Insufficient live data to compare these symbols.";
 
   return {
@@ -495,7 +651,7 @@ export async function yahooIntelligenceFallback() {
   const indices = await mapPool([...indexDefs], 4, async (idx) => {
     const chart = await fetchYahooChart(idx.symbol, "5d");
     const price = chart.meta?.regularMarketPrice ?? null;
-    const previous = chart.meta?.previousClose ?? chart.meta?.chartPreviousClose ?? null;
+    const previous = previousCloseFrom(chart);
     const changePercent =
       price != null && previous != null && previous !== 0
         ? ((price - previous) / previous) * 100
@@ -521,10 +677,10 @@ export async function yahooIntelligenceFallback() {
       sentiment,
       key_points: [
         "Live index snapshot from Yahoo Finance",
-        "Probabilistic estimates only — not financial advice",
+        "Probabilistic estimates only â€” not financial advice",
       ],
     },
-    disclaimer: "Yahoo Finance fallback. Probabilistic estimates only — not financial advice.",
+    disclaimer: "Yahoo Finance fallback. Probabilistic estimates only â€” not financial advice.",
   };
 }
 
@@ -572,7 +728,7 @@ export async function yahooFallenGiantsFallback(limit = 10): Promise<FallenGiant
       why_it_could_recover:
         recoveredFromTrough > 5
           ? `Price has bounced ~${recoveredFromTrough.toFixed(0)}% off the recent low, suggesting sellers may be exhausting.`
-          : "A sharp dislocation can mean-revert if the business remains intact — verify fundamentals separately.",
+          : "A sharp dislocation can mean-revert if the business remains intact â€” verify fundamentals separately.",
       why_it_might_not_recover:
         "Fallback mode cannot verify news catalysts or fundamentals. The decline may reflect lasting deterioration.",
       recovery_confirmations:
@@ -596,17 +752,8 @@ export async function yahooFallenGiantsFallback(limit = 10): Promise<FallenGiant
     universe_size: FALLBACK_UNIVERSE.length,
     filters_applied: { provider: "yahoo_finance", mode: "fallback", min_decline_pct: 18 },
     disclaimer:
-      "Fallen Giants research scan on live prices. A sharp decline is not a buy signal — verify catalysts and filings.",
+      "Fallen Giants research scan on live prices. A sharp decline is not a buy signal â€” verify catalysts and filings.",
   };
-}
-
-function scoreBlock(
-  label: string,
-  score: number | null,
-  reasons: string[],
-  risks: string[],
-) {
-  return { score, label, reasons, risks };
 }
 
 async function fetchYahooSearchQuote(query: string) {
@@ -621,11 +768,10 @@ async function fetchYahooSearchQuote(query: string) {
   };
 }
 
-/** Full company research page — live Finnhub + Yahoo, Simply Wall St–style fair value. */
+/** Full company research page — live Finnhub + Yahoo, rubric scores and multi-method fair value. */
 export async function yahooResearchFallback(symbol: string) {
-  const { fetchLiveFundamentals, estimateFairValue } = await import(
-    "@/lib/market/live-fundamentals"
-  );
+  const { fetchLiveFundamentals, estimateFairValue } = await import("@/lib/market/live-fundamentals");
+  const { buildStockPilotScores, ratingFromScore } = await import("@/lib/market/research-scoring");
   const { companyNameFor } = await import("@/lib/news-tickers");
 
   const [analysis, fundamentals] = await Promise.all([
@@ -633,163 +779,67 @@ export async function yahooResearchFallback(symbol: string) {
     fetchLiveFundamentals(symbol),
   ]);
 
-  const techScore = analysis.scores?.technical_score ?? null;
-  const momScore = analysis.scores?.momentum_score ?? null;
-  const rsi14 = analysis.technical.rsi_14;
-  const sma50 = analysis.technical.sma_50;
   const price = fundamentals.price ?? analysis.quote.price;
   const name =
-    fundamentals.company_name ||
-    analysis.company_name ||
-    companyNameFor(symbol) ||
-    analysis.symbol;
+    fundamentals.company_name || analysis.company_name || companyNameFor(symbol) || analysis.symbol;
+  const f = { ...fundamentals, price };
+  const fair = estimateFairValue(f);
+  const tech = analysis.technical;
+  const scores = buildStockPilotScores(f, fair, {
+    rsi_14: tech.rsi_14,
+    sma_50: tech.sma_50,
+    sma_200: tech.sma_200,
+    volatility_annualized: tech.volatility_annualized,
+    price,
+  });
+  const overall = scores.overall.score;
 
-  const fair = estimateFairValue({ ...fundamentals, price });
+  const pct = (v: number, d = 1) => `${(v * 100).toFixed(d)}%`;
 
-  // --- Dimension scores with concrete reasons ---
-  const healthReasons: string[] = [];
-  const healthRisks: string[] = [];
-  let healthScore = 50;
-  if (fundamentals.return_on_equity != null) {
-    const roePct = fundamentals.return_on_equity * 100;
-    healthScore = Math.max(15, Math.min(95, 45 + roePct * 1.2));
-    healthReasons.push(`Return on equity ${roePct.toFixed(1)}%`);
-    if (roePct < 8) healthRisks.push("ROE is modest versus high-quality compounders");
-  } else {
-    healthRisks.push("ROE not reported in the latest feed");
-  }
-  if (fundamentals.debt_to_equity != null) {
-    healthReasons.push(`Debt/equity ${fundamentals.debt_to_equity.toFixed(1)}`);
-    if (fundamentals.debt_to_equity > 150) {
-      healthScore -= 12;
-      healthRisks.push("Leverage looks elevated versus many peers");
-    } else if (fundamentals.debt_to_equity < 50) {
-      healthScore += 6;
-      healthReasons.push("Balance sheet leverage is relatively contained");
-    }
-  }
-  if (fundamentals.profit_margin != null) {
-    healthReasons.push(`Net margin ${(fundamentals.profit_margin * 100).toFixed(1)}%`);
-  }
-  healthScore = Math.max(5, Math.min(98, Math.round(healthScore)));
-
-  const growthReasons: string[] = [];
-  const growthRisks: string[] = [];
-  let growthScore = momScore ?? 50;
-  if (fundamentals.revenue_growth != null) {
-    const g = fundamentals.revenue_growth * 100;
-    growthScore = Math.max(10, Math.min(95, 50 + g * 1.5));
-    growthReasons.push(`Revenue growth (TTM YoY) ${g.toFixed(1)}%`);
-    if (g < 0) growthRisks.push("Top-line contraction can pressure multiples");
-  } else {
-    growthReasons.push(
-      momScore != null
-        ? `Near-term price momentum score ${momScore.toFixed(0)}/100 (revenue growth not in feed)`
-        : "Growth inputs limited — using price momentum as a proxy",
-    );
-    growthRisks.push("Confirm revenue/EPS growth in filings before sizing a thesis");
-  }
-  growthScore = Math.round(growthScore);
-
-  const valueReasons: string[] = [];
-  const valueRisks: string[] = [];
-  let valueScore = 50;
-  if (fundamentals.pe_ratio != null && fundamentals.pe_ratio > 0) {
-    valueScore = Math.max(8, Math.min(92, 90 - fundamentals.pe_ratio * 1.5));
-    valueReasons.push(`Trailing P/E ${fundamentals.pe_ratio.toFixed(1)}×`);
-  } else {
-    valueRisks.push("Trailing P/E unavailable for this name");
-  }
-  if (fundamentals.forward_pe != null && fundamentals.forward_pe > 0) {
-    valueReasons.push(`Forward P/E ${fundamentals.forward_pe.toFixed(1)}×`);
-  }
-  if (fundamentals.peg_ratio != null && fundamentals.peg_ratio > 0) {
-    valueReasons.push(`PEG ${fundamentals.peg_ratio.toFixed(2)}`);
-    if (fundamentals.peg_ratio < 1) {
-      valueScore += 8;
-      valueReasons.push("PEG below 1 can signal growth is not fully priced");
-    } else if (fundamentals.peg_ratio > 2.5) {
-      valueScore -= 8;
-      valueRisks.push("Elevated PEG — paying up for expected growth");
-    }
-  }
-  if (fair.upside_percent != null) {
-    valueReasons.push(
-      `Model fair-value gap ${fair.upside_percent >= 0 ? "+" : ""}${fair.upside_percent.toFixed(1)}% (${fair.valuation_label})`,
-    );
-    valueScore = Math.round(valueScore * 0.7 + Math.max(10, Math.min(90, 50 + fair.upside_percent)) * 0.3);
-  }
-  valueScore = Math.max(5, Math.min(95, Math.round(valueScore)));
-
-  const qualityReasons: string[] = [];
-  const qualityRisks: string[] = [];
-  let qualityScore = techScore ?? 50;
-  if (fundamentals.sector) qualityReasons.push(`Sector: ${fundamentals.sector}`);
-  if (sma50 != null && price != null) {
-    qualityReasons.push(
-      price >= sma50
-        ? "Price holds above the 50-day average (constructive intermediate trend)"
-        : "Price sits below the 50-day average (weaker intermediate trend)",
-    );
-  }
-  if (rsi14 != null) qualityReasons.push(`RSI(14) ${rsi14.toFixed(0)}`);
-  if (fundamentals.profit_margin != null && fundamentals.profit_margin > 0.15) {
-    qualityScore += 8;
-    qualityReasons.push("Healthy profitability supports quality");
-  }
-  qualityRisks.push("Quality here blends profitability with technical structure — not a full moat score");
-  qualityScore = Math.max(5, Math.min(95, Math.round(qualityScore)));
-
-  const momReasons: string[] = [];
-  const momRisks: string[] = [];
-  if (fundamentals.change_percent != null) {
-    momReasons.push(`Session move ${fundamentals.change_percent >= 0 ? "+" : ""}${fundamentals.change_percent.toFixed(2)}%`);
-  }
-  if (momScore != null) momReasons.push(`Momentum score ${momScore.toFixed(0)}/100 from recent price action`);
-  momRisks.push("Short-term price noise can reverse quickly around news/earnings");
-
-  const riskReasons: string[] = [];
-  const riskRisks: string[] = [];
-  let riskScore = analysis.scores?.risk_score ?? 50;
-  if (fundamentals.beta != null) {
-    riskScore = Math.max(15, Math.min(90, 40 + fundamentals.beta * 25));
-    riskReasons.push(`Beta ${fundamentals.beta.toFixed(2)} vs market`);
-    if (fundamentals.beta > 1.4) riskRisks.push("Higher beta = larger swings when the market sells off");
-  } else if (rsi14 != null) {
-    riskReasons.push(`RSI extremity contributes to risk reading (${rsi14.toFixed(0)})`);
-  }
-  if (fundamentals.fifty_two_week_high != null && price != null) {
-    const drawdown = ((fundamentals.fifty_two_week_high - price) / fundamentals.fifty_two_week_high) * 100;
-    riskReasons.push(`${drawdown.toFixed(0)}% below 52-week high`);
-  }
-  riskScore = Math.round(riskScore);
-
-  const overall = Math.round(
-    (healthScore * 0.2 +
-      growthScore * 0.2 +
-      valueScore * 0.2 +
-      qualityScore * 0.15 +
-      (momScore ?? 50) * 0.15 +
-      (100 - riskScore) * 0.1),
-  );
-
+  // --- Narrative built strictly from the numbers above ---
   const bull: string[] = [];
   const bear: string[] = [];
-  if (fair.valuation_label === "Undervalued") {
-    bull.push(`Fair-value engine flags the shares as undervalued (~${fair.upside_percent?.toFixed(0)}% to mid estimate).`);
-  }
-  if (growthScore >= 60) bull.push("Growth / momentum profile looks supportive on the latest data.");
-  if (healthScore >= 60) bull.push("Profitability / leverage metrics support a durable business case.");
-  if (bull.length === 0) bull.push("Wait for clearer confirmation in earnings and trend before leaning bullish.");
 
-  if (fair.valuation_label === "Overvalued") {
-    bear.push(`Fair-value engine sees limited upside / stretch versus the mid estimate.`);
+  if (fair.valuation_label === "Undervalued" && fair.upside_percent != null) {
+    bull.push(`Shares trade below our fair-value band (~${fair.upside_percent.toFixed(0)}% to the mid estimate of ${fair.fair_value_mid?.toFixed(0)}).`);
   }
-  if (riskScore >= 60) bear.push("Risk metrics (beta / drawdown / RSI) argue for smaller size or wider stops.");
-  if (sma50 != null && price != null && price < sma50) {
-    bear.push("Trading below the 50-day average — intermediate trend still needs to reclaim.");
+  if (f.forward_pe != null && f.pe_ratio != null && f.forward_pe < f.pe_ratio * 0.6) {
+    bull.push(`Street expects earnings to rebuild: forward P/E ${f.forward_pe.toFixed(1)}× vs trailing GAAP ${f.pe_ratio.toFixed(1)}×.`);
   }
-  if (bear.length === 0) bear.push("Macro shocks, competition, and earnings misses can invalidate a constructive setup.");
+  if (f.gross_margin != null && f.gross_margin > 0.6) {
+    bull.push(`Gross margin of ${pct(f.gross_margin)} signals pricing power and a software/IP-like cost structure.`);
+  }
+  if (f.revenue_growth_3y != null && f.revenue_growth_3y > 0.1) {
+    bull.push(`Revenue has compounded at ${pct(f.revenue_growth_3y)} a year over three years.`);
+  }
+  if (scores.financial_health.score != null && scores.financial_health.score >= 65) {
+    bull.push("Balance-sheet metrics (liquidity, leverage, coverage) are in good shape.");
+  }
+  if (bull.length === 0) bull.push("Few quantitative positives right now — a constructive case needs a fundamental catalyst.");
+
+  if (fair.valuation_label === "Overvalued" && fair.upside_percent != null) {
+    bear.push(`Price sits above our fair-value band (${fair.upside_percent.toFixed(0)}% gap to the mid estimate).`);
+  }
+  if (f.gaap_distorted) {
+    bear.push("Trailing GAAP earnings are depressed (acquisition amortization / one-offs); the thesis leans on forward estimates being met.");
+  }
+  if (f.interest_coverage != null && f.interest_coverage < 4) {
+    bear.push(`Interest coverage of ${f.interest_coverage.toFixed(1)}× is thin — debt service eats a meaningful share of operating profit.`);
+  }
+  if (f.debt_to_equity != null && f.debt_to_equity > 1) {
+    bear.push(`Debt/equity ${f.debt_to_equity.toFixed(2)}× — leverage limits flexibility in a downturn.`);
+  }
+  if (f.fifty_two_week_high != null && price != null) {
+    const dd = ((f.fifty_two_week_high - price) / f.fifty_two_week_high) * 100;
+    if (dd > 25) bear.push(`Shares are ${dd.toFixed(0)}% below the 52-week high — the market has already repriced expectations.`);
+  }
+  if (tech.sma_200 != null && price != null && price < tech.sma_200) {
+    bear.push("Trading below the 200-day average — the long-term trend is still down.");
+  }
+  if (bear.length === 0) bear.push("Macro shocks, competition, and guidance cuts remain the main ways this setup fails.");
+
+  const rating = ratingFromScore(overall);
+  const growthAssumption = fair.assumptions.growth_rate;
 
   return {
     symbol: analysis.symbol,
@@ -797,43 +847,31 @@ export async function yahooResearchFallback(symbol: string) {
     quote: {
       symbol: analysis.symbol,
       price: price ?? analysis.quote.price,
-      change: fundamentals.change ?? analysis.quote.change,
-      change_percent: fundamentals.change_percent ?? analysis.quote.change_percent,
-      currency: fundamentals.currency || analysis.quote.currency || "USD",
-      market_cap: fundamentals.market_cap,
-      volume: null,
-      previous_close: null,
-      provider: fundamentals.provider,
+      change: f.change ?? analysis.quote.change,
+      change_percent: f.change_percent ?? analysis.quote.change_percent,
+      currency: f.currency || analysis.quote.currency || "USD",
+      market_cap: f.market_cap,
+      volume: f.volume ?? analysis.quote.volume,
+      previous_close: f.previous_close ?? analysis.quote.previous_close,
+      provider: f.provider,
       freshness: "live",
       as_of: new Date().toISOString(),
     },
     fundamentals: {
-      pe_ratio: fundamentals.pe_ratio,
-      forward_pe: fundamentals.forward_pe,
-      peg_ratio: fundamentals.peg_ratio,
-      eps: fundamentals.eps,
-      return_on_equity: fundamentals.return_on_equity,
-      debt_to_equity: fundamentals.debt_to_equity,
-      profit_margin: fundamentals.profit_margin,
-      revenue_growth: fundamentals.revenue_growth,
-      beta: fundamentals.beta,
-      dividend_yield: fundamentals.dividend_yield,
-      sector: fundamentals.sector,
-      industry: fundamentals.industry,
-      description: null,
-      provider: fundamentals.provider,
+      ...f,
+      provider: f.provider,
     },
     technical: {
       symbol: analysis.symbol,
-      rsi_14: analysis.technical.rsi_14,
+      rsi_14: tech.rsi_14,
       macd: null,
       macd_signal: null,
-      macd_histogram: analysis.technical.macd_histogram,
+      macd_histogram: tech.macd_histogram,
       ema_12: null,
       ema_26: null,
-      sma_20: null,
-      sma_50: analysis.technical.sma_50,
-      sma_200: null,
+      sma_20: tech.sma_20,
+      sma_50: tech.sma_50,
+      sma_200: tech.sma_200,
       atr_14: null,
       vwap: null,
       bb_upper: null,
@@ -842,30 +880,14 @@ export async function yahooResearchFallback(symbol: string) {
       adx_14: null,
       provider: "yahoo_finance",
       computed_at: new Date().toISOString(),
-      data_points: analysis.technical.data_points,
+      data_points: tech.data_points,
     },
     scores: {
-      technical_score: techScore,
-      momentum_score: momScore,
-      risk_score: riskScore,
+      technical_score: analysis.scores.technical_score,
+      momentum_score: scores.momentum.score,
+      risk_score: scores.risk.score,
     },
-    stockpilot_scores: {
-      overall: scoreBlock(
-        "Overall",
-        overall,
-        [
-          `Weighted blend of health, growth, value, quality, momentum, and risk`,
-          `Live data via ${fundamentals.provider}`,
-        ],
-        ["Scores are research aids — not buy/sell recommendations"],
-      ),
-      financial_health: scoreBlock("Financial Health", healthScore, healthReasons, healthRisks),
-      growth: scoreBlock("Growth", growthScore, growthReasons, growthRisks),
-      value: scoreBlock("Value", valueScore, valueReasons, valueRisks),
-      quality: scoreBlock("Quality", qualityScore, qualityReasons, qualityRisks),
-      momentum: scoreBlock("Momentum", momScore, momReasons, momRisks),
-      risk: scoreBlock("Risk", riskScore, riskReasons, riskRisks),
-    },
+    stockpilot_scores: scores,
     fair_value: {
       current_price: fair.current_price,
       fair_value_low: fair.fair_value_low,
@@ -874,53 +896,46 @@ export async function yahooResearchFallback(symbol: string) {
       upside_percent: fair.upside_percent,
       valuation_label: fair.valuation_label,
       methods: fair.methods,
+      assumptions: fair.assumptions,
       confidence: fair.confidence,
       disclaimer: fair.disclaimer,
     },
     equity_report: {
       bull_case: bull,
       bear_case: bear,
-      investment_thesis: `${name} (${analysis.symbol}) scores ${overall}/100 overall. Fair-value read: ${fair.valuation_label}${
-        fair.upside_percent != null
-          ? ` (${fair.upside_percent >= 0 ? "+" : ""}${fair.upside_percent.toFixed(0)}% to mid estimate)`
-          : ""
-      }. This blends live fundamentals with technical context — use it as a structured starting point, not a complete equity thesis.`,
+      investment_thesis: `${name} (${analysis.symbol}) scores ${overall ?? "—"}/100 (${rating}). Valuation: ${fair.valuation_label}${
+        fair.upside_percent != null ? ` (${fair.upside_percent >= 0 ? "+" : ""}${fair.upside_percent.toFixed(0)}% to fair-value mid)` : ""
+      }${growthAssumption != null ? `, assuming ~${(growthAssumption * 100).toFixed(0)}% earnings growth` : ""}. Built from live Finnhub fundamentals and Yahoo price history — a structured starting point, not a complete thesis.`,
       growth_opportunities: [
-        fundamentals.revenue_growth != null
-          ? `Latest revenue growth print: ${(fundamentals.revenue_growth * 100).toFixed(1)}% YoY`
-          : "Track upcoming earnings for revenue/EPS acceleration",
-        "Watch whether price reclaims key moving averages with improving volume",
+        f.revenue_growth_3y != null ? `Revenue 3-yr CAGR ${pct(f.revenue_growth_3y)}; TTM ${f.revenue_growth != null ? pct(f.revenue_growth) : "n/a"}` : "Track revenue trajectory at the next print",
+        f.eps_forward != null ? `Street forward EPS ${f.eps_forward.toFixed(2)} vs trailing GAAP ${f.eps?.toFixed(2) ?? "n/a"}` : "Watch EPS revisions",
       ],
       competitive_advantages: [
-        fundamentals.sector
-          ? `Operates in ${fundamentals.sector}${fundamentals.industry ? ` / ${fundamentals.industry}` : ""}`
-          : "Review competitive positioning and switching costs in company filings",
+        f.gross_margin != null ? `Gross margin ${pct(f.gross_margin)} · operating margin ${f.operating_margin != null ? pct(f.operating_margin) : "n/a"}` : "Review margin structure in filings",
+        f.sector ? `Sector: ${f.sector}${f.industry ? ` / ${f.industry}` : ""}` : "Confirm competitive positioning qualitatively",
       ],
       main_risks: bear,
       catalysts: [
-        "Next earnings release and guidance",
-        fundamentals.analyst_target != null
-          ? `Street mean target near ${fundamentals.currency} ${fundamentals.analyst_target.toFixed(2)}`
-          : "Analyst revisions / sector news flow",
+        "Next earnings release and full-year guidance",
+        f.analyst_target != null ? `Street mean target ${f.currency} ${f.analyst_target.toFixed(2)}` : "Analyst estimate revisions",
       ],
-      concerns: [
-        "Valuation and scores update as live feeds refresh — re-check before acting",
-      ],
+      concerns: f.data_notes.length > 0 ? f.data_notes : ["Metrics refresh with live feeds — re-check before acting"],
       stockpilot_rating: overall,
       moat_assessment:
-        healthScore >= 70
-          ? "Profitability metrics are consistent with a stronger franchise — still verify moat qualitatively."
-          : "Moat not fully scored here; treat quality as a blend of margins and trend structure.",
+        scores.quality.score != null && scores.quality.score >= 70
+          ? "Margin profile is consistent with a durable franchise — verify switching costs and share trends qualitatively."
+          : "Moat not evidenced by margins alone; treat quality as provisional.",
     },
     explanation: {
-      overall_rating: recommendationFromScore(overall) ?? "Hold",
-      investment_thesis: `${name} live research snapshot — overall ${overall}/100, valuation ${fair.valuation_label}.`,
+      overall_rating: rating,
+      investment_thesis: `${name}: overall ${overall ?? "—"}/100, ${fair.valuation_label}.`,
       reasons: bull,
       potential_risks: bear,
       confidence: fair.confidence,
     },
-    data_warnings: [],
+    data_warnings: f.data_notes,
     disclaimer:
-      "Probabilistic estimates only — not financial advice. Past performance does not guarantee future results.",
+      "Educational research built from live market data. Fair values and scores are model estimates — not financial advice.",
   };
 }
+

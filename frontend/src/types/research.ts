@@ -22,7 +22,13 @@ export type FairValueEstimate = {
   fair_value_high: number | null;
   upside_percent: number | null;
   valuation_label?: "Undervalued" | "About fair" | "Overvalued" | "Insufficient data";
-  methods: { name: string; estimate: number | null; note: string | null }[];
+  methods: { name: string; estimate: number | null; weight?: number; note: string | null }[];
+  assumptions?: {
+    growth_rate: number | null;
+    fair_pe: number | null;
+    discount_rate: number;
+    terminal_pe: number | null;
+  };
   confidence: number;
   disclaimer: string;
 };
