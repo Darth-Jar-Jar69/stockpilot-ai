@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // Standalone is for Docker/Railway; Vercel uses its own output.
+  ...(process.env.VERCEL ? {} : { output: "standalone" as const }),
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "images.unsplash.com" },

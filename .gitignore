@@ -24,6 +24,7 @@ skills-lock.json
 # Environment
 .env
 .env.local
+.env.vercel
 .env.*.local
 !.env.example
 frontend/prisma/dev.db

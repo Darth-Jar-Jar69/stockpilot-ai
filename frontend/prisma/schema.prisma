@@ -3,10 +3,12 @@ generator client {
 }
 
 datasource db {
-  // Use PostgreSQL in production (Railway). Locally you can still point
-  // DATABASE_URL at Docker Postgres from docker-compose.yml.
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // Use Postgres in production (Vercel + Neon) and locally (Docker or Neon).
+  // Example local: postgresql://stockpilot:stockpilot_dev@localhost:5432/stockpilot
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Neon: set DATABASE_URL_DIRECT to the non-pooler host for migrations.
+  directUrl = env("DATABASE_URL_DIRECT")
 }
 
 model User {
