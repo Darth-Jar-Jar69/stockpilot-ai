@@ -8,9 +8,8 @@ import {
 import { generateAssistantFallback } from "@/lib/assistant-fallback";
 import { getSession } from "@/lib/auth/session";
 
-import { getBackendUrl } from "@/lib/backend";
+import { fetchBackendJson, isBackendConfigured } from "@/lib/backend";
 
-const API_URL = getBackendUrl();
 const BACKEND_TIMEOUT_MS = 8000;
 
 async function tryBackendReply(
@@ -18,18 +17,23 @@ async function tryBackendReply(
   history: { role: string; content: string }[],
   context: { page?: string; symbol?: string },
 ): Promise<string | null> {
+  if (!isBackendConfigured()) return null;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/assistant/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, history, context }),
-      signal: controller.signal,
+    const { ok, data } = await fetchBackendJson<{ reply?: string }>({
+      path: "/api/v1/assistant/chat",
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, history, context }),
+        signal: controller.signal,
+      },
+      revalidate: false,
     });
-    const data = await res.json();
-    if (res.ok && typeof data.reply === "string" && data.reply.trim()) {
+    if (ok && typeof data.reply === "string" && data.reply.trim()) {
       return data.reply.trim();
     }
   } catch {

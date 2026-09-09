@@ -1,44 +1,39 @@
+export const maxDuration = 60;
+
 import { NextResponse } from "next/server";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooFallenGiantsFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const params = new URLSearchParams();
-
-  const pass = [
-    "min_decline",
-    "min_market_cap",
-    "risk",
-    "min_recovery_score",
-    "min_fundamental_score",
-    "catalyst_type",
-    "max_days_since_crash",
-    "sort_by",
-    "limit",
-  ] as const;
-
-  for (const key of pass) {
-    const value = searchParams.get(key);
-    if (value != null && value !== "") params.set(key, value);
-  }
-  if (!params.has("limit")) params.set("limit", "20");
+  const params = new URLSearchParams(searchParams);
+  if (!params.get("limit")) params.set("limit", "12");
+  const limit = Number(params.get("limit") || 12);
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/scanner/fallen-giants?${params}`, {
-      cache: "no-store",
+    const { ok, status, data } = await fetchBackendJson({
+      path: "/api/v1/scanner/fallen-giants",
+      searchParams: params,
+      revalidate: false,
     });
-    const data = await res.json();
-    if (!res.ok) {
+    if (ok) return NextResponse.json(data);
+    try {
+      return NextResponse.json(await yahooFallenGiantsFallback(limit));
+    } catch {
       return NextResponse.json(
-        { error: data.detail?.message ?? data.message ?? "Fallen Giants unavailable." },
-        { status: res.status },
+        { error: backendErrorMessage(data, "Fallen Giants unavailable.") },
+        { status },
       );
     }
-    return NextResponse.json(data);
   } catch {
-    return NextResponse.json({ error: "Backend unavailable." }, { status: 503 });
+    try {
+      return NextResponse.json(await yahooFallenGiantsFallback(limit));
+    } catch {
+      return NextResponse.json(
+        { error: "Fallen Giants temporarily unavailable." },
+        { status: 503 },
+      );
+    }
   }
 }

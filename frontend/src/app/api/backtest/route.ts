@@ -1,23 +1,45 @@
 import { NextResponse } from "next/server";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { backendErrorMessage, fetchBackendJson, isBackendConfigured } from "@/lib/backend";
 
 export async function POST(request: Request) {
+  if (!isBackendConfigured()) {
+    return NextResponse.json(
+      {
+        error: "Backtesting requires the FastAPI backend. Configure BACKEND_URL or run the backend locally.",
+        code: "backend_not_configured",
+      },
+      { status: 503 },
+    );
+  }
+
   try {
     const body = await request.json();
-    const res = await fetch(`${API_URL}/api/v1/backtest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    const { ok, status, data } = await fetchBackendJson({
+      path: "/api/v1/backtest",
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      revalidate: false,
     });
-    const data = await res.json();
-    if (!res.ok) {
-      return NextResponse.json({ error: data.detail?.message ?? "Backtest failed." }, { status: res.status });
+
+    if (ok) {
+      return NextResponse.json(data);
     }
-    return NextResponse.json(data);
+
+    return NextResponse.json(
+      { error: backendErrorMessage(data, "Backtest failed.") },
+      { status },
+    );
   } catch {
-    return NextResponse.json({ error: "Backend unavailable." }, { status: 503 });
+    return NextResponse.json(
+      {
+        error: "Backtesting requires the FastAPI backend. It is unreachable right now.",
+        code: "backend_unavailable",
+      },
+      { status: 503 },
+    );
   }
 }

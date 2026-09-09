@@ -1,18 +1,25 @@
 import { NextResponse } from "next/server";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { fetchBackendJson } from "@/lib/backend";
+import { yahooIntelligenceFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET() {
   try {
-    const res = await fetch(`${API_URL}/api/v1/market/intelligence`, { next: { revalidate: 60 } });
-    const data = await res.json();
-    if (!res.ok) {
-      return NextResponse.json({ error: data.detail?.message ?? "Unavailable." }, { status: res.status });
+    const { ok, data } = await fetchBackendJson({
+      path: "/api/v1/market/intelligence",
+      revalidate: 60,
+    });
+
+    if (ok) {
+      return NextResponse.json(data);
     }
-    return NextResponse.json(data);
+
+    return NextResponse.json(await yahooIntelligenceFallback());
   } catch {
-    return NextResponse.json({ error: "Backend unavailable." }, { status: 503 });
+    try {
+      return NextResponse.json(await yahooIntelligenceFallback());
+    } catch {
+      return NextResponse.json({ error: "Market intelligence unavailable." }, { status: 503 });
+    }
   }
 }

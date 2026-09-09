@@ -1,27 +1,41 @@
 import { NextResponse } from "next/server";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { backendErrorMessage, fetchBackendJson, isBackendConfigured } from "@/lib/backend";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ symbol: string }> },
 ) {
   const { symbol } = await params;
+
+  if (!isBackendConfigured()) {
+    return NextResponse.json(
+      {
+        error: "Full company research requires the FastAPI backend. Try the Analysis page for Yahoo fallback data.",
+        code: "backend_not_configured",
+      },
+      { status: 503 },
+    );
+  }
+
   try {
-    const res = await fetch(`${API_URL}/api/v1/research/${encodeURIComponent(symbol)}`, {
-      next: { revalidate: 120 },
+    const { ok, status, data } = await fetchBackendJson({
+      path: `/api/v1/research/${encodeURIComponent(symbol)}`,
+      revalidate: 120,
     });
-    const data = await res.json();
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: data.detail?.message ?? "Research unavailable." },
-        { status: res.status },
-      );
+
+    if (ok) {
+      return NextResponse.json(data);
     }
-    return NextResponse.json(data);
+
+    return NextResponse.json(
+      { error: backendErrorMessage(data, "Research unavailable.") },
+      { status },
+    );
   } catch {
-    return NextResponse.json({ error: "Backend unavailable." }, { status: 503 });
+    return NextResponse.json(
+      { error: "Research unavailable. Backend is unreachable." },
+      { status: 503 },
+    );
   }
 }

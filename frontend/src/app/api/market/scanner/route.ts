@@ -1,8 +1,9 @@
+export const maxDuration = 60;
+
 import { NextResponse } from "next/server";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooScannerFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -14,18 +15,25 @@ export async function GET(request: Request) {
   if (risk) params.set("risk_level", risk);
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/scanner?${params}`, {
-      cache: "no-store",
+    const { ok, status, data } = await fetchBackendJson({
+      path: "/api/v1/scanner",
+      searchParams: params,
+      revalidate: false,
     });
-    const data = await res.json();
-    if (!res.ok) {
+    if (ok) return NextResponse.json(data);
+    try {
+      return NextResponse.json(await yahooScannerFallback(Number(params.get("limit") || 30)));
+    } catch {
       return NextResponse.json(
-        { error: data.detail?.message ?? "Scanner unavailable." },
-        { status: res.status },
+        { error: backendErrorMessage(data, "Scanner unavailable.") },
+        { status },
       );
     }
-    return NextResponse.json(data);
   } catch {
-    return NextResponse.json({ error: "Backend unavailable." }, { status: 503 });
+    try {
+      return NextResponse.json(await yahooScannerFallback(Number(params.get("limit") || 30)));
+    } catch {
+      return NextResponse.json({ error: "Scanner temporarily unavailable." }, { status: 503 });
+    }
   }
 }

@@ -3,9 +3,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/db";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { fetchBackendJson, isBackendConfigured } from "@/lib/backend";
 
 export async function GET() {
   const session = await getSession();
@@ -43,17 +41,33 @@ export async function POST(request: Request) {
     });
   }
 
-  const res = await fetch(`${API_URL}/api/v1/portfolio/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(
-      holdings.map((h: { symbol: string; shares: number; avgCost?: number }) => ({
-        symbol: String(h.symbol).toUpperCase(),
-        shares: Number(h.shares),
-        avg_cost: h.avgCost != null ? Number(h.avgCost) : null,
-      })),
-    ),
-  });
-  const analysis = await res.json();
+  let analysis: unknown = {
+    error: "Portfolio analysis requires the FastAPI backend.",
+    code: "backend_not_configured",
+  };
+
+  if (isBackendConfigured()) {
+    try {
+      const { ok, data } = await fetchBackendJson({
+        path: "/api/v1/portfolio/analyze",
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            holdings.map((h: { symbol: string; shares: number; avgCost?: number }) => ({
+              symbol: String(h.symbol).toUpperCase(),
+              shares: Number(h.shares),
+              avg_cost: h.avgCost != null ? Number(h.avgCost) : null,
+            })),
+          ),
+        },
+        revalidate: false,
+      });
+      if (ok) analysis = data;
+    } catch {
+      // Holdings saved; analysis skipped when backend unreachable.
+    }
+  }
+
   return NextResponse.json({ holdings, analysis });
 }

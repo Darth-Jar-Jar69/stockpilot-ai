@@ -6,9 +6,8 @@ import {
 } from "@/lib/news-tickers";
 import type { NewsArticle, NewsStockMention } from "@/types/scanner";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { fetchBackendJson } from "@/lib/backend";
+import { yahooNewsFallback, yahooQuoteFallback } from "@/lib/market/yahoo-fallback";
 
 type QuoteSnapshot = {
   price: number | null;
@@ -17,22 +16,29 @@ type QuoteSnapshot = {
 
 async function fetchQuote(symbol: string): Promise<QuoteSnapshot> {
   try {
-    const res = await fetch(`${API_URL}/api/v1/quotes/${encodeURIComponent(symbol)}`, {
-      cache: "no-store",
+    const { ok, data } = await fetchBackendJson<Record<string, unknown>>({
+      path: `/api/v1/quotes/${encodeURIComponent(symbol)}`,
+      revalidate: false,
     });
-    if (!res.ok) return { price: null, change_percent: null };
-    const data = await res.json();
-    return {
-      price: typeof data.price === "number" ? data.price : null,
-      change_percent: typeof data.change_percent === "number" ? data.change_percent : null,
-    };
+    if (ok) {
+      return {
+        price: typeof data.price === "number" ? data.price : null,
+        change_percent: typeof data.change_percent === "number" ? data.change_percent : null,
+      };
+    }
+  } catch {
+    // Yahoo below
+  }
+  try {
+    const q = await yahooQuoteFallback(symbol);
+    return { price: q.price, change_percent: q.change_percent };
   } catch {
     return { price: null, change_percent: null };
   }
 }
 
 async function buildQuoteMap(symbols: string[]): Promise<Map<string, QuoteSnapshot>> {
-  const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];
+  const unique = [...new Set(symbols.map((s) => s.toUpperCase()))].slice(0, 12);
   const entries = await Promise.all(
     unique.map(async (symbol) => [symbol, await fetchQuote(symbol)] as const),
   );
@@ -98,33 +104,38 @@ export async function GET(request: Request) {
   if (symbol) q.set("symbol", symbol);
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/news?${q}`, { cache: "no-store" });
-    const data = await res.json();
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: data.detail?.message ?? "News unavailable." },
-        { status: res.status },
-      );
-    }
-
-    const rawList = Array.isArray(data) ? data : [];
-    const allSymbols = rawList.flatMap((item) => {
-      const raw = item as Record<string, unknown>;
-      const title = String(raw.title ?? "");
-      const summary = raw.summary != null ? String(raw.summary) : "";
-      const fromApi = Array.isArray(raw.symbols) ? (raw.symbols as string[]) : [];
-      const fromRelated = Array.isArray(raw.related_stocks)
-        ? raw.related_stocks.map((s) => String((s as Record<string, unknown>).symbol ?? ""))
-        : [];
-      return [...fromApi, ...fromRelated, ...extractTickersFromText(`${title} ${summary}`)];
+    const { ok, data } = await fetchBackendJson<unknown>({
+      path: "/api/v1/news",
+      searchParams: q,
+      revalidate: false,
     });
+    if (ok) {
+      const rawList = Array.isArray(data) ? data : [];
+      const allSymbols = rawList.flatMap((item) => {
+        const raw = item as Record<string, unknown>;
+        const title = String(raw.title ?? "");
+        const summary = raw.summary != null ? String(raw.summary) : "";
+        const fromApi = Array.isArray(raw.symbols) ? (raw.symbols as string[]) : [];
+        const fromRelated = Array.isArray(raw.related_stocks)
+          ? raw.related_stocks.map((s) => String((s as Record<string, unknown>).symbol ?? ""))
+          : [];
+        return [...fromApi, ...fromRelated, ...extractTickersFromText(`${title} ${summary}`)];
+      });
 
-    const quotes = await buildQuoteMap(allSymbols);
-    const articles = rawList.map((item) =>
-      normalizeArticle(item as Record<string, unknown>, quotes),
-    );
+      const quotes = await buildQuoteMap(allSymbols);
+      const articles = rawList.map((item) =>
+        normalizeArticle(item as Record<string, unknown>, quotes),
+      );
+      return NextResponse.json(articles);
+    }
+  } catch {
+    // Yahoo fallback below
+  }
+
+  try {
+    const articles = await yahooNewsFallback(Number(limit) || 15, symbol);
     return NextResponse.json(articles);
   } catch {
-    return NextResponse.json({ error: "Backend unavailable." }, { status: 503 });
+    return NextResponse.json({ error: "News temporarily unavailable." }, { status: 503 });
   }
 }

@@ -12,9 +12,7 @@ import { prisma } from "@/lib/db";
 import { computePaperPositions, getOrCreateUserProfile } from "@/lib/paper-trading";
 import type { PaperAccountState, PaperPosition, PaperTradeRow } from "@/types/paper-trading";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { fetchBackendJson } from "@/lib/backend";
 
 type QuoteData = {
   price: number;
@@ -27,21 +25,19 @@ type QuoteData = {
 
 async function fetchQuote(symbol: string): Promise<QuoteData | null> {
   try {
-    const res = await fetch(`${API_URL}/api/v1/quotes/${encodeURIComponent(symbol)}`, {
-      cache: "no-store",
+    const { ok, data } = await fetchBackendJson<Record<string, unknown>>({
+      path: `/api/v1/quotes/${encodeURIComponent(symbol)}`,
+      revalidate: false,
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (typeof data.price === "number") {
-        return {
-          price: data.price,
-          change: data.change ?? null,
-          change_percent: data.change_percent ?? null,
-          previous_close: data.previous_close ?? null,
-          volume: data.volume ?? null,
-          as_of: data.as_of ?? new Date().toISOString(),
-        };
-      }
+    if (ok && typeof data.price === "number") {
+      return {
+        price: data.price,
+        change: typeof data.change === "number" ? data.change : null,
+        change_percent: typeof data.change_percent === "number" ? data.change_percent : null,
+        previous_close: typeof data.previous_close === "number" ? data.previous_close : null,
+        volume: typeof data.volume === "number" ? data.volume : null,
+        as_of: typeof data.as_of === "string" ? data.as_of : new Date().toISOString(),
+      };
     }
   } catch {
     // fall through to Yahoo

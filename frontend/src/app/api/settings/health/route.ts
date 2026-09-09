@@ -1,18 +1,31 @@
 import { NextResponse } from "next/server";
 
-import { getBackendUrl } from "@/lib/backend";
-
-const API_URL = getBackendUrl();
+import { backendErrorMessage, fetchBackendJson } from "@/lib/backend";
+import { yahooHealthFallback } from "@/lib/market/yahoo-fallback";
 
 export async function GET() {
   try {
-    const res = await fetch(`${API_URL}/api/v1/health`, { next: { revalidate: 30 } });
-    const data = await res.json();
-    return NextResponse.json(data, { status: res.status });
-  } catch {
+    const { ok, status, data } = await fetchBackendJson({
+      path: "/api/v1/health",
+      revalidate: 30,
+    });
+
+    if (ok) {
+      return NextResponse.json(data, { status });
+    }
+
+    const fallback = await yahooHealthFallback();
     return NextResponse.json(
-      { status: "error", providers: [], error: "Backend offline" },
-      { status: 503 },
+      {
+        ...fallback,
+        error: backendErrorMessage(data, "Backend health check failed."),
+      },
+      { status: fallback.status === "ok" ? 200 : 503 },
     );
+  } catch {
+    const fallback = await yahooHealthFallback();
+    return NextResponse.json(fallback, {
+      status: fallback.status === "ok" ? 200 : 503,
+    });
   }
 }

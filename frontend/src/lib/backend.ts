@@ -1,8 +1,9 @@
 /**
  * Server-side FastAPI base URL.
- * Prefer BACKEND_URL (private Railway network) over the public NEXT_PUBLIC_API_URL.
+ * Prefer BACKEND_URL (private network) over the public NEXT_PUBLIC_API_URL.
+ * Never use localhost on Vercel / production hosts.
  */
-export function getBackendUrl(): string {
+export function getBackendUrl(): string | null {
   const candidates = [
     process.env.BACKEND_URL,
     process.env.STOCKPILOT_AI_URL,
@@ -11,10 +12,33 @@ export function getBackendUrl(): string {
 
   for (const value of candidates) {
     const trimmed = value?.trim();
-    if (trimmed) return trimmed.replace(/\/$/, "");
+    if (!trimmed) continue;
+    const normalized = trimmed.replace(/\/$/, "");
+    if (isLocalBackendUrl(normalized) && isHostedRuntime()) {
+      continue;
+    }
+    return normalized;
   }
 
+  if (isHostedRuntime()) return null;
   return "http://localhost:8000";
+}
+
+function isHostedRuntime(): boolean {
+  return Boolean(process.env.VERCEL) || process.env.NODE_ENV === "production";
+}
+
+function isLocalBackendUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+export function isBackendConfigured(): boolean {
+  return getBackendUrl() != null;
 }
 
 type ProxyOptions = {
@@ -24,11 +48,15 @@ type ProxyOptions = {
   revalidate?: number | false;
 };
 
-/** Fetch JSON from the FastAPI backend. Throws on network failure. */
+/** Fetch JSON from the FastAPI backend. Throws when unset or on network failure. */
 export async function fetchBackendJson<T = unknown>(
   options: ProxyOptions,
 ): Promise<{ ok: boolean; status: number; data: T }> {
   const base = getBackendUrl();
+  if (!base) {
+    throw new Error("Backend URL is not configured.");
+  }
+
   const query =
     typeof options.searchParams === "string"
       ? options.searchParams
@@ -66,7 +94,6 @@ export function backendErrorMessage(data: unknown, fallback: string): string {
   }
   if (typeof detail === "string") return detail;
   if (typeof record.message === "string") {
-    // Railway edge 502
     if (record.message === "Application failed to respond") {
       return "Market data service is temporarily unavailable. Retry in a moment.";
     }
