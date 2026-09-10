@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, TrendingDown, TrendingUp } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowUpRight, Newspaper, TrendingDown, TrendingUp } from "lucide-react";
 
 import { StockChart } from "@/components/charts/stock-chart";
 import { ScoreCard } from "@/components/features/research/score-card";
@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCurrency, formatPercent } from "@/lib/utils";
+import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 import type { OHLCVResponse } from "@/types/market";
 import type { CompanyResearch } from "@/types/research";
 
@@ -104,6 +104,13 @@ function StatPanel({ title, children }: { title: string; children: React.ReactNo
   );
 }
 
+function ratingBadgeClass(rating?: string | null): string {
+  if (!rating) return "bg-slate-500/20 text-slate-300 border-slate-500/30";
+  if (rating.includes("Buy")) return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+  if (rating.includes("Sell")) return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+  return "bg-amber-500/15 text-amber-200 border-amber-500/30";
+}
+
 function valuationBadgeClass(label?: string): string {
   if (label === "Undervalued") return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
   if (label === "Overvalued") return "bg-rose-500/20 text-rose-300 border-rose-500/40";
@@ -176,6 +183,9 @@ export function CompanyResearchView({ symbol }: { symbol: string }) {
   const sp = research.stockpilot_scores;
   const fv = research.fair_value;
   const report = research.equity_report;
+  const catalysts = research.price_catalysts;
+  const rating =
+    catalysts?.action_rationale?.rating ?? research.explanation?.overall_rating ?? null;
   const isPositive = (quote?.change ?? 0) >= 0;
   const money = (v: number) => formatCurrency(v, currency);
 
@@ -227,6 +237,11 @@ export function CompanyResearchView({ symbol }: { symbol: string }) {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {rating && (
+              <Badge variant="outline" className={cn("text-sm", ratingBadgeClass(rating))}>
+                {rating}
+              </Badge>
+            )}
             {sp?.overall.score != null && (
               <Badge className="text-sm">Score {sp.overall.score.toFixed(0)}/100</Badge>
             )}
@@ -393,6 +408,128 @@ export function CompanyResearchView({ symbol }: { symbol: string }) {
           )}
         </StatPanel>
       </div>
+
+      {/* News ↔ price: why the stock moved, and how that backs Buy / Sell / Hold */}
+      {catalysts && (catalysts.catalysts.length > 0 || catalysts.action_rationale) && (
+        <Card className="glass border-border/50">
+          <CardHeader>
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle className="flex items-center gap-2 text-white">
+                <Newspaper className="h-5 w-5 text-primary" />
+                What moved the stock
+              </CardTitle>
+              {rating && (
+                <Badge variant="outline" className={ratingBadgeClass(rating)}>
+                  {rating}
+                </Badge>
+              )}
+            </div>
+            <CardDescription className="text-slate-400">
+              {catalysts.action_rationale.headline}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            {catalysts.action_rationale.reasons.length > 0 && (
+              <div className="rounded-xl border border-primary/25 bg-primary/5 px-4 py-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-primary">
+                  Why {rating ?? "this rating"}
+                </p>
+                <ul className="space-y-1.5 text-sm text-slate-200">
+                  {catalysts.action_rationale.reasons.map((r) => (
+                    <li key={r} className="flex gap-2">
+                      <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+                      <span>{r}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {catalysts.catalysts.length > 0 ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                    News-backed sessions
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Moves ≥{catalysts.move_threshold_percent}% over {catalysts.lookback_days}d ·{" "}
+                    {catalysts.matched_moves}/{catalysts.moves_found} matched to headlines
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  {catalysts.catalysts.map((c) => (
+                    <div
+                      key={`${c.date}-${c.headline.slice(0, 40)}`}
+                      className="grid gap-3 rounded-xl border border-border/40 bg-card/40 p-3 sm:grid-cols-[110px_1fr_auto]"
+                    >
+                      <div>
+                        <p className="font-mono text-xs text-slate-500">{c.date}</p>
+                        <p
+                          className={cn(
+                            "mt-1 flex items-center gap-1 font-mono text-lg font-semibold",
+                            c.direction === "up" ? "text-gain" : "text-loss",
+                          )}
+                        >
+                          {c.direction === "up" ? (
+                            <TrendingUp className="h-4 w-4" />
+                          ) : (
+                            <TrendingDown className="h-4 w-4" />
+                          )}
+                          {fmtSignedPct(c.price_change_percent)}
+                        </p>
+                        <Badge variant="secondary" className="mt-1 text-[10px] capitalize">
+                          {c.category}
+                        </Badge>
+                      </div>
+                      <div className="min-w-0">
+                        {c.url ? (
+                          <a
+                            href={c.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-start gap-1 text-sm font-medium text-white hover:text-primary"
+                          >
+                            {c.headline}
+                            <ArrowUpRight className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" />
+                          </a>
+                        ) : (
+                          <p className="text-sm font-medium text-white">{c.headline}</p>
+                        )}
+                        <p className="mt-1 text-xs leading-relaxed text-slate-400">{c.attribution}</p>
+                        {c.summary && (
+                          <p className="mt-1 line-clamp-2 text-xs text-slate-500">{c.summary}</p>
+                        )}
+                      </div>
+                      <div className="text-right text-[11px] text-slate-500">
+                        <p>{c.source ?? "Wire"}</p>
+                        <p className="font-mono text-slate-400">{money(c.close)}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">
+                No sessions above the {catalysts.move_threshold_percent}% move threshold matched a
+                company headline in the last {catalysts.lookback_days} days. Rating leans on
+                fundamentals and technicals until the next clear catalyst.
+              </p>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link href={`/news?symbol=${research.symbol}`}>
+                  <Newspaper className="mr-2 h-3.5 w-3.5" />
+                  Full {research.symbol} wire
+                </Link>
+              </Button>
+              <Button variant="outline" size="sm" asChild>
+                <Link href={`/paper-trading?symbol=${research.symbol}`}>Paper trade</Link>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {sp && (
         <div>

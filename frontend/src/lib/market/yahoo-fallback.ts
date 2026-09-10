@@ -774,6 +774,8 @@ export async function yahooResearchFallback(symbol: string) {
   const { buildStockPilotScores, ratingFromScore } = await import("@/lib/market/research-scoring");
   const { companyNameFor } = await import("@/lib/news-tickers");
 
+  const { buildPriceCatalysts } = await import("@/lib/market/price-catalysts");
+
   const [analysis, fundamentals] = await Promise.all([
     yahooAnalysisFallback(symbol),
     fetchLiveFundamentals(symbol),
@@ -793,12 +795,21 @@ export async function yahooResearchFallback(symbol: string) {
     price,
   });
   const overall = scores.overall.score;
+  const rating = ratingFromScore(overall);
+
+  // Match real headlines to big daily moves so Buy/Sell/Hold cites actual events.
+  const catalystInsight = await buildPriceCatalysts(symbol, {
+    companyName: name,
+    rating: rating as "Strong Buy" | "Buy" | "Hold" | "Sell" | "Strong Sell",
+    lookbackDays: 90,
+    maxCatalysts: 6,
+  });
 
   const pct = (v: number, d = 1) => `${(v * 100).toFixed(d)}%`;
 
-  // --- Narrative built strictly from the numbers above ---
-  const bull: string[] = [];
-  const bear: string[] = [];
+  // --- Narrative: fundamentals + news-backed price catalysts ---
+  const bull: string[] = [...catalystInsight.bull_from_news];
+  const bear: string[] = [...catalystInsight.bear_from_news];
 
   if (fair.valuation_label === "Undervalued" && fair.upside_percent != null) {
     bull.push(`Shares trade below our fair-value band (~${fair.upside_percent.toFixed(0)}% to the mid estimate of ${fair.fair_value_mid?.toFixed(0)}).`);
@@ -838,8 +849,8 @@ export async function yahooResearchFallback(symbol: string) {
   }
   if (bear.length === 0) bear.push("Macro shocks, competition, and guidance cuts remain the main ways this setup fails.");
 
-  const rating = ratingFromScore(overall);
   const growthAssumption = fair.assumptions.growth_rate;
+  const newsThesisLine = catalystInsight.action_rationale.headline;
 
   return {
     symbol: analysis.symbol,
@@ -901,11 +912,11 @@ export async function yahooResearchFallback(symbol: string) {
       disclaimer: fair.disclaimer,
     },
     equity_report: {
-      bull_case: bull,
-      bear_case: bear,
+      bull_case: bull.slice(0, 6),
+      bear_case: bear.slice(0, 6),
       investment_thesis: `${name} (${analysis.symbol}) scores ${overall ?? "—"}/100 (${rating}). Valuation: ${fair.valuation_label}${
         fair.upside_percent != null ? ` (${fair.upside_percent >= 0 ? "+" : ""}${fair.upside_percent.toFixed(0)}% to fair-value mid)` : ""
-      }${growthAssumption != null ? `, assuming ~${(growthAssumption * 100).toFixed(0)}% earnings growth` : ""}. Built from live Finnhub fundamentals and Yahoo price history — a structured starting point, not a complete thesis.`,
+      }${growthAssumption != null ? `, assuming ~${(growthAssumption * 100).toFixed(0)}% earnings growth` : ""}. ${newsThesisLine}`,
       growth_opportunities: [
         f.revenue_growth_3y != null ? `Revenue 3-yr CAGR ${pct(f.revenue_growth_3y)}; TTM ${f.revenue_growth != null ? pct(f.revenue_growth) : "n/a"}` : "Track revenue trajectory at the next print",
         f.eps_forward != null ? `Street forward EPS ${f.eps_forward.toFixed(2)} vs trailing GAAP ${f.eps?.toFixed(2) ?? "n/a"}` : "Watch EPS revisions",
@@ -914,11 +925,12 @@ export async function yahooResearchFallback(symbol: string) {
         f.gross_margin != null ? `Gross margin ${pct(f.gross_margin)} · operating margin ${f.operating_margin != null ? pct(f.operating_margin) : "n/a"}` : "Review margin structure in filings",
         f.sector ? `Sector: ${f.sector}${f.industry ? ` / ${f.industry}` : ""}` : "Confirm competitive positioning qualitatively",
       ],
-      main_risks: bear,
+      main_risks: bear.slice(0, 5),
       catalysts: [
+        ...catalystInsight.catalysts.slice(0, 3).map((c) => c.attribution),
         "Next earnings release and full-year guidance",
         f.analyst_target != null ? `Street mean target ${f.currency} ${f.analyst_target.toFixed(2)}` : "Analyst estimate revisions",
-      ],
+      ].slice(0, 5),
       concerns: f.data_notes.length > 0 ? f.data_notes : ["Metrics refresh with live feeds — re-check before acting"],
       stockpilot_rating: overall,
       moat_assessment:
@@ -926,16 +938,19 @@ export async function yahooResearchFallback(symbol: string) {
           ? "Margin profile is consistent with a durable franchise — verify switching costs and share trends qualitatively."
           : "Moat not evidenced by margins alone; treat quality as provisional.",
     },
+    price_catalysts: catalystInsight,
     explanation: {
       overall_rating: rating,
-      investment_thesis: `${name}: overall ${overall ?? "—"}/100, ${fair.valuation_label}.`,
-      reasons: bull,
-      potential_risks: bear,
-      confidence: fair.confidence,
+      investment_thesis: `${name}: ${rating} — ${newsThesisLine}`,
+      reasons: catalystInsight.action_rationale.reasons.length > 0
+        ? catalystInsight.action_rationale.reasons
+        : bull.slice(0, 4),
+      potential_risks: bear.slice(0, 4),
+      confidence: Math.min(90, fair.confidence + (catalystInsight.matched_moves > 0 ? 8 : 0)),
     },
     data_warnings: f.data_notes,
     disclaimer:
-      "Educational research built from live market data. Fair values and scores are model estimates — not financial advice.",
+      "Educational research built from live market data. Fair values, scores, and news↔price attributions are model estimates — not financial advice. Correlation is not causation.",
   };
 }
 

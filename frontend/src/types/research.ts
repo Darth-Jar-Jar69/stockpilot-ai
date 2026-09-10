@@ -46,6 +46,39 @@ export type EquityAnalystReport = {
   moat_assessment: string | null;
 };
 
+export type PriceCatalystEvent = {
+  date: string;
+  price_change_percent: number;
+  close: number;
+  direction: "up" | "down";
+  headline: string;
+  summary: string | null;
+  source: string | null;
+  url: string | null;
+  published_at: string | null;
+  category: string;
+  relevance: number;
+  attribution: string;
+};
+
+export type NewsActionRationale = {
+  rating: string;
+  headline: string;
+  reasons: string[];
+};
+
+export type PriceCatalystInsight = {
+  catalysts: PriceCatalystEvent[];
+  action_rationale: NewsActionRationale;
+  bull_from_news: string[];
+  bear_from_news: string[];
+  lookback_days: number;
+  move_threshold_percent: number;
+  news_count: number;
+  moves_found: number;
+  matched_moves: number;
+};
+
 export type CompanyResearch = {
   symbol: string;
   company_name: string | null;
@@ -56,6 +89,8 @@ export type CompanyResearch = {
   stockpilot_scores: StockPilotScores | null;
   fair_value: FairValueEstimate | null;
   equity_report: EquityAnalystReport | null;
+  /** News headlines matched to significant price moves — backs Buy/Sell/Hold. */
+  price_catalysts: PriceCatalystInsight | null;
   explanation: import("@/types/market").SymbolAnalysis["explanation"];
   data_warnings: string[];
   disclaimer: string;
